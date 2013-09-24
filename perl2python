@@ -1,3 +1,27 @@
 #!/usr/bin/perl -w
 
-print "perl2python - coming soon!\n";
+# george caley presents:
+# perl2python
+# a COMP2041 assignment
+
+use Lexer;
+
+# create list of files from arguments
+@files = @ARGV;
+# if it's empty, add stdin
+if (@ARGV == 0) {
+	push @files, "-";
+}
+
+foreach $file (@files) {
+
+	open(F, "< $file");
+
+	$data = "";
+	while (<F>) {
+		$data .= $_;
+	}
+
+	Lexer::tokenise($data);
+
+}
