@@ -25,10 +25,15 @@ foreach $file (@files) {
 	@tokens = Lexer::tokenise($data);
 
 	foreach $token (@tokens) {
-		foreach $thing (@$token) {
-			print "'$thing' ";
+		#foreach $thing (@$token) {
+		#	print "$thing ";
+		#}
+		#print "$token[0]\n";
+		if (@$token == 1) {
+			print "$token->[0]\n";
+		} else {
+			print "$token->[0]: $token->[1]\n";
 		}
-		print "\n";
 	}
 
 }

@@ -4,20 +4,51 @@ package Lexer;
 # by george caley
 
 # token types
-use constant COMMENT => 0;
-use constant FUNCTION_NAME => 1;
-use constant VARIABLE => 2;
-use constant STRING => 3;
-use constant SEMICOLON => 4;
-use constant EQUALS => 5;
-use constant DOUBLEEQUALS => 6;
+use constant TOKENS => qw(
+	COMMENT
+	FUNCTION_NAME
+	SCALAR
+	STRING
+	NUMBER
+	SEMICOLON
+	EQUALS DOUBLEEQUALS POINT
+	PARENTHESIS_OPEN PARENTHESIS_CLOSE
+	SQUARE_OPEN SQUARE_CLOSE
+	CURLY_OPEN CURLY_CLOSE
+	COMMA
+	PLUS INCREMENT
+	MINUS DECREMENT
+	MUL POW
+	DIV
+);
+
+# single char token mappings
+# this will hopefully clean up the lexer code a bit
+# anything slightly less trivial (e.g. =, which is special because we need to test ==) 
+# will need its own code
+%singleCharTokens = (
+	";" => SEMICOLON,
+	"(" => PARENTHESIS_OPEN,
+	")" => PARENTHESIS_CLOSE,
+	"[" => SQUARE_OPEN,
+	"]" => SQUARE_CLOSE,
+	"{" => CURLY_OPEN,
+	"}" => CURLY_CLOSE,
+	"," => COMMA,
+	"/" => DIV
+);
 
 # tokeniser states
-use constant STATE_IDLE => 0;
-use constant STATE_COMMENT => 1;
-use constant STATE_FUNCTION_NAME => 2;
-use constant STATE_VARIABLE => 3;
-use constant STATE_STRING => 4;
+use constant STATES => qw(
+	STATE_IDLE
+	STATE_COMMENT
+	STATE_FUNCTION_NAME
+	STATE_SCALAR
+	STATE_ARRAY
+	STATE_HASH
+	STATE_STRING
+	STATE_NUMBER
+);
 
 # tokens are stored as arrays/tuples/something
 # (type, value)
@@ -54,23 +85,28 @@ sub tokenise {
 		$curr = $chars[$i]; # current char
 		$next = $chars[$i+1]; # next char
 
-		if ($state == STATE_IDLE) {
-			if ($curr eq "#") {
-				# start reading comment
-				$state = STATE_COMMENT;
-			} elsif ($curr eq ";") {
-				# woah, that's a semicolon mate
+		if ($state eq STATE_IDLE) {
+			if (defined $singleCharTokens{$curr}) {
+				# use a single char token mapping
 				@token = (
-					SEMICOLON
+					$singleCharTokens{$curr}
 				);
 
 				push @tokens, [@token];
-				# stay in idle state
+				# remain in the idle state
+			} elsif ($curr eq "#") {
+				# start reading comment
+				$state = STATE_COMMENT;
 			} elsif ($curr eq "=") {
 				# is it double equals?
 				if ($next eq "=") {
 					@token = (
 						DOUBLEEQUALS
+					);
+					$i++;
+				} elsif ($next eq ">") {
+					@token = (
+						POINT
 					);
 					$i++;
 				} else {
@@ -80,18 +116,72 @@ sub tokenise {
 				}
 
 				push @tokens, [@token];
+			} elsif ($curr eq "*") {
+				# is it pow?
+				if ($next eq "*") {
+					@token = (
+						POW
+					);
+					$i++;
+				} else {
+					@token = (
+						MUL
+					);
+				}
+
+				push @tokens, [@token];
+			} elsif ($curr eq "+") {
+				# is it increment?
+				if ($next eq "+") {
+					@token = (
+						INCREMENT
+					);
+					$i++;
+				} else {
+					@token = (
+						PLUS
+					);
+				}
+
+				push @tokens, [@token];
+			} elsif ($curr eq "-") {
+				# is it decrement?
+				if ($next eq "-") {
+					@token = (
+						DECREMENT
+					);
+					$i++;
+				} else {
+					@token = (
+						MINUS
+					);
+				}
+
+				push @tokens, [@token];
 			} elsif ($curr eq "\"") {
 				# start reading string
 				$state = STATE_STRING;
 			} elsif ($curr eq "\$") {
-				# start reading VARIABLE
-				$state = STATE_VARIABLE;
-			} elsif ($curr =~ /[A-z0-9_]/) {
+				# start reading scalar
+				$state = STATE_SCALAR;
+			} elsif ($curr eq "@") {
+				# start reading array
+				$state = STATE_ARRAY;
+			} elsif ($curr eq "%") {
+				# start reading hash
+				$state = STATE_HASH;
+			} elsif ($curr =~ /[A-z_]/) {
 				# start reading function name
 				$state = STATE_FUNCTION_NAME;
-				$value .= $curr;
+				next;
+				#$value .= $curr;
+			} elsif ($curr =~ /[0-9]/) {
+				# start reading number
+				$state = STATE_NUMBER;
+				next;
+				#$value .= $curr;
 			}
-		} elsif ($state == STATE_COMMENT) {
+		} elsif ($state eq STATE_COMMENT) {
 			if ($curr eq "\n") {
 				# newline! end of comment
 				@token = (
@@ -106,7 +196,7 @@ sub tokenise {
 				# consume char
 				$value .= $curr;
 			}
-		} elsif ($state == STATE_STRING) {
+		} elsif ($state eq STATE_STRING) {
 			# keep reading until we hit the end quote
 			if ($curr eq "\"") {
 				# we're done
@@ -131,15 +221,23 @@ sub tokenise {
 				# consume char
 				$value .= $curr;
 			}
-		} elsif ($state == STATE_VARIABLE) {
+		} elsif ($state eq STATE_SCALAR || $state eq STATE_ARRAY || $state eq STATE_HASH) {
 			# consume char
 			$value .= $curr;
 
 			# keep reading until we hit something unusual
 			if (!($next =~ /[A-z0-9_]/)) {
-				# end of variable name
+				# end of name
+				if ($state eq STATE_SCALAR) {
+					$type = SCALAR;
+				} elsif ($state eq STATE_ARRAY) {
+					$type = ARRAY;
+				} elsif ($state eq STATE_HASH) {
+					$type = HASH;
+				}
+
 				@token = (
-					VARIABLE,
+					$type,
 					$value
 				);
 
@@ -147,7 +245,7 @@ sub tokenise {
 				$state = STATE_IDLE;
 				$value = "";
 			}
-		} elsif ($state == STATE_FUNCTION_NAME) {
+		} elsif ($state eq STATE_FUNCTION_NAME) {
 			# consume char
 			$value .= $curr;
 
@@ -155,6 +253,21 @@ sub tokenise {
 				# end of function name
 				@token = (
 					FUNCTION_NAME,
+					$value
+				);
+
+				push @tokens, [@token];
+				$state = STATE_IDLE;
+				$value = "";
+			}
+		} elsif ($state eq STATE_NUMBER) {
+			# consume char
+			$value .= $curr;
+
+			if (!($next =~ /[0-9]/)) {
+				# end of number
+				@token = (
+					NUMBER,
 					$value
 				);
 
