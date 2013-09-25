@@ -6,12 +6,12 @@ package Lexer;
 # token types
 use constant TOKENS => qw(
 	COMMENT
-	FUNCTION_NAME
+	WORD
 	SCALAR
 	STRING
 	NUMBER
 	SEMICOLON
-	EQUALS DOUBLEEQUALS POINT
+	EQUALS DOUBLEEQUALS POINT MATCH
 	PARENTHESIS_OPEN PARENTHESIS_CLOSE
 	SQUARE_OPEN SQUARE_CLOSE
 	CURLY_OPEN CURLY_CLOSE
@@ -42,7 +42,7 @@ use constant TOKENS => qw(
 use constant STATES => qw(
 	STATE_IDLE
 	STATE_COMMENT
-	STATE_FUNCTION_NAME
+	STATE_WORD
 	STATE_SCALAR
 	STATE_ARRAY
 	STATE_HASH
@@ -109,6 +109,11 @@ sub tokenise {
 						POINT
 					);
 					$i++;
+				} elsif ($next eq "~") {
+					@token = (
+						MATCH
+					);
+					$i++;
 				} else {
 					@token = (
 						EQUALS
@@ -158,9 +163,10 @@ sub tokenise {
 				}
 
 				push @tokens, [@token];
-			} elsif ($curr eq "\"") {
+			} elsif ($curr eq '"' || $curr eq "'") {
 				# start reading string
 				$state = STATE_STRING;
+                $separator = $curr;
 			} elsif ($curr eq "\$") {
 				# start reading scalar
 				$state = STATE_SCALAR;
@@ -170,9 +176,9 @@ sub tokenise {
 			} elsif ($curr eq "%") {
 				# start reading hash
 				$state = STATE_HASH;
-			} elsif ($curr =~ /[A-z_]/) {
-				# start reading function name
-				$state = STATE_FUNCTION_NAME;
+			} elsif ($curr =~ /[A-Za-z_]/) {
+				# start reading a word (stuff like keywords, function names, etc.)
+				$state = STATE_WORD;
 				next;
 				#$value .= $curr;
 			} elsif ($curr =~ /[0-9]/) {
@@ -198,7 +204,7 @@ sub tokenise {
 			}
 		} elsif ($state eq STATE_STRING) {
 			# keep reading until we hit the end quote
-			if ($curr eq "\"") {
+			if ($curr eq $separator) {
 				# we're done
 				@token = (
 					STRING,
@@ -209,14 +215,20 @@ sub tokenise {
 				$state = STATE_IDLE;
 				$value = "";
 			} elsif ($curr eq "\\") {
-				# consume it
-				$value .= $curr;
 				# is it a backslash followed by a quote?
-				if ($next eq '"') {
-					# consume it as well
+				if ($next eq $separator) {
+                    # consume just the quote
 					$value .= $next;
 					$i++;
-				}
+                } elsif ($next eq "\\") {
+                    # consume both backslashes
+                    $value .= $curr;
+                    $value .= $next;
+                    $i++;
+				} else {
+                    # consume it like normal
+                    $value .= $curr;
+                }
 			} else {
 				# consume char
 				$value .= $curr;
@@ -226,7 +238,7 @@ sub tokenise {
 			$value .= $curr;
 
 			# keep reading until we hit something unusual
-			if (!($next =~ /[A-z0-9_]/)) {
+			if (!($next =~ /[A-Za-z0-9_]/)) {
 				# end of name
 				if ($state eq STATE_SCALAR) {
 					$type = SCALAR;
@@ -245,14 +257,14 @@ sub tokenise {
 				$state = STATE_IDLE;
 				$value = "";
 			}
-		} elsif ($state eq STATE_FUNCTION_NAME) {
+		} elsif ($state eq STATE_WORD) {
 			# consume char
 			$value .= $curr;
 
-			if (!($next =~ /[A-z0-9_]/)) {
+			if (!($next =~ /[A-Za-z0-9_]/)) {
 				# end of function name
 				@token = (
-					FUNCTION_NAME,
+					WORD,
 					$value
 				);
 
@@ -282,7 +294,7 @@ sub tokenise {
 	}
 
 	return @tokens;
-	
+
 }
 
 1;
