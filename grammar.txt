@@ -16,6 +16,8 @@ here's the grammar for the parser
 let's just pretend that + and - are the only arithmetic operations
 
 <statement> ::= <call> | <varmod> | <open> ";"
+<statementlist> ::= <statement>
+<statementlist> ::= <statementlist> <statementlist>
 
 <varmod> ::= <inc> | <dec> | <pluseq> | <minuseq>
 <inc> ::= <var> "++"
@@ -26,8 +28,23 @@ let's just pretend that + and - are the only arithmetic operations
 <expr> ::= <var>
 <expr> ::= <literal>
 <expr> ::= <call>
+<expr> ::= <arraydecl> | <hashdecl>
 <expr> ::= <expr> "+" <expr>
 <expr> ::= <expr> "-" <expr>
+
+<var> ::= <scalar>
+<var> ::= <array>
+<var> ::= <hash>
+<var> ::= <scalar> "[" <expr> "]"
+<var> ::= <scalar> "{" <expr> "}"
+
+<arraydecl> ::= "(" <arraydecllist> ")"
+<arraydecllist> ::= <expr>
+<arraydecllist> ::= <arraydecllist> "," <arraydecllist>
+
+<hashdecl> ::= "(" <hashdecllist> ")"
+<hashdecllist> ::= <expr> "=>" <expr>
+<hashdecllist> ::= <hashdecllist> "," <hashdecllist>
 
 <call> ::= <name> <arglist>
 <call> ::= <name> "(" <arglist> ")"

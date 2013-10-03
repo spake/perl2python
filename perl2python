@@ -18,6 +18,11 @@ use constant TOKENS => qw(
 	NUMBER
 	SEMICOLON
 	EQUALS DOUBLEEQUALS POINT MATCH
+	GREATER_THAN GREATER_EQUALS LESS_THAN LESS_EQUALS
+	NOT_EQUALS LOGICAL_NOT
+	SHIFT_LEFT SHIFT_RIGHT
+	BIT_OR BIT_AND LOGICAL_OR LOGICAL_AND
+	XOR BIT_NOT
 	PARENTHESIS_OPEN PARENTHESIS_CLOSE
 	SQUARE_OPEN SQUARE_CLOSE
 	CURLY_OPEN CURLY_CLOSE
@@ -41,7 +46,9 @@ use constant TOKENS => qw(
 	"{" => CURLY_OPEN,
 	"}" => CURLY_CLOSE,
 	"," => COMMA,
-	"/" => DIV
+	"/" => DIV,
+	"^" => XOR,
+	"~" => BIT_NOT
 );
 
 # tokeniser states
@@ -125,6 +132,57 @@ sub tokenise {
 					$i++;
 				} else {
 					$token = makeToken(EQUALS);
+				}
+
+				push @tokens, $token;
+			} elsif ($curr eq ">") {
+				if ($next eq "=") {
+					$token = makeToken(GREATER_EQUALS);
+					$i++;
+				} elsif ($next eq ">") {
+					$token = makeToken(SHIFT_RIGHT);
+					$i++;
+				} else {
+					$token = makeToken(GREATER_THAN);
+				}
+
+				push @tokens, $token;
+			} elsif ($curr eq "<") {
+				if ($next eq "=") {
+					$token = makeToken(LESS_EQUALS);
+					$i++;
+				} elsif ($next eq ">") {
+					$token = makeToken(SHIFT_LEFT);
+					$i++;
+				} else {
+					$token = makeToken(LESS_THAN);
+				}
+
+				push @tokens, $token;
+			} elsif ($curr eq "!") {
+				if ($next eq "=") {
+					$token = makeToken(NOT_EQUALS);
+					$i++;
+				} else {
+					$token = makeToken(LOGICAL_NOT);
+				}
+
+				push @tokens, $token;
+			} elsif ($curr eq "&") {
+				if ($next eq "&") {
+					$token = makeToken(LOGICAL_AND);
+					$i++;
+				} else {
+					$token = makeToken(BIT_AND);
+				}
+
+				push @tokens, $token;
+			} elsif ($curr eq "|") {
+				if ($next eq "|") {
+					$token = makeToken(LOGICAL_OR);
+					$i++;
+				} else {
+					$token = makeToken(BIT_OR);
 				}
 
 				push @tokens, $token;
@@ -245,8 +303,17 @@ sub tokenise {
 			$value .= $curr;
 
 			if (!($next =~ /[A-Za-z0-9_]/)) {
-				# end of function name
-				push @tokens, makeToken(WORD, $value);
+				# end of function name/loop/something like that
+				# check for logical operators like and, or, not
+				if ($value eq "and") {
+					push @tokens, makeToken(LOGICAL_AND);
+				} elsif ($value eq "or") {
+					push @tokens, makeToken(LOGICAL_OR);
+				} elsif ($value eq "not") {
+					push @tokens, makeToken(LOGICAL_NOT);
+				} else {
+					push @tokens, makeToken(WORD, $value);
+				}
 
 				$state = STATE_IDLE;
 				$value = "";
@@ -278,6 +345,9 @@ use constant AST_NODES => qw(
 	NODE_STATEMENTS
 	NODE_COMMENT
 	NODE_CALL
+	NODE_VARIABLE
+	NODE_ARRAY
+	NODE_HASH
 );
 
 # the parser operates on a few global variables
@@ -409,12 +479,6 @@ sub parse_args {
 
 sub parse_arg {
 	# wtf is an arg
-	#my %curr = %{$tokens[$upto]};
-	#print "reading arg ", $curr{"type"}, "\n";
-
-	#print "the fuck is ", $curr{"type"}, "!?\n";
-	#die;
-	#return $tokens[$upto];
 	return parse_expr();
 }
 
@@ -429,14 +493,111 @@ sub parse_expr {
 	}
 
 	# is it a variable?
-	if ($curr{"type"} eq SCALAR) {
-		$upto++;
-		return \%curr;
+	if (($curr{"type"} eq SCALAR) || ($curr{"type"} eq ARRAY) || ($curr{"type"} eq HASH)) {
+		return parse_var();
 	}
 
 	# must be a literal
 	$upto++;
 	return \%curr;
+}
+
+sub parse_var {
+	my %curr = %{$tokens[$upto]};
+	$upto++;
+
+	my %node = (
+		"name" => $curr{"value"}
+	);
+
+	if ($curr{"type"} eq SCALAR) {
+		$node{"type"} = NODE_VARIABLE;
+
+		# are we indexing an array/hash?
+		my %next = %{$tokens[$upto]};
+		if ($next{"type"} eq SQUARE_OPEN) {
+			# array indexing
+			$upto++;
+			$node{"index"} = parse_expr();
+
+			# consume closing bracket
+			%next = %{$tokens[$upto]};
+			($next{"type"} eq SQUARE_CLOSE) or die "Expecting closing square bracket";
+			$upto++;
+		} elsif ($next{"type"} eq CURLY_OPEN) {
+			# hash indexing
+			$upto++;
+			$node{"index"} = parse_expr();
+
+			# consume closing bracket
+			%next = %{$tokens[$upto]};
+			($next{"type"} eq CURLY_CLOSE) or die "Expecting closing curly bracket";
+			$upto++;
+		}
+		# otherwise it's a plain old scalar
+	} elsif ($curr{"type"} eq ARRAY) {
+		$node{"type"} = NODE_ARRAY;
+	} elsif ($curr{"type"} eq HASH) {
+		$node{"type"} = NODE_HASH;
+	}
+
+	return \%node;
+}
+
+# --== COMPILER ==--
+
+# turn the AST into valid python, how bad can that be?
+# ...oh god, why didn't I just use regex in the first place ;_;
+
+# have a global for indentation level
+$indent_level = 0;
+use constant INDENT => "  ";
+
+sub compile {
+	# argument will just be the root of the AST
+
+	my %node = %{$_[0]};
+	my $type = $node{"type"};
+
+	print "compiling $type\n";
+
+	my $output = "";
+	my $indent = INDENT x $indent_level;
+
+	if ($type eq NODE_STATEMENTS) {
+
+		# compile them one by one
+		for $statement (@{$node{"children"}}) {
+			$output .= compile($statement);
+		}
+
+	} elsif ($type eq NODE_CALL) {
+
+		# check for special calls
+		#my $name = "heisenberg";
+		my $name = $node{"name"};
+		my @args = @{$node{"children"}};
+
+		if ($name eq "print") {
+			for $i (0..$#args) {
+				$output .= $indent;
+				$output .= "sys.stdout.write( str( ";
+				$output .= compile($args[$i]);
+				$output .= " ) ";
+				$output .= ")";
+				$output .= "\n";
+			}
+		}
+
+	} elsif ($type eq STRING) {
+
+		# easy mode
+		my $value = $node{"value"};
+		$value =~ s/"/\\"/;
+		$output .= '"' . $value . '"';
+	}
+
+	return $output;
 }
 
 # --== MAIN STUFF ==--
@@ -467,4 +628,10 @@ foreach $file (@files) {
 
 	$tree_ref = parse();
 	print Dumper($tree_ref);
+
+	$output = "import sys\n";
+	$output .= compile($tree_ref);
+	print "\n\n";
+	print $output;
+
 }
