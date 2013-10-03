@@ -1,5 +1,8 @@
 #!/usr/bin/perl -w
 
+use Data::Dumper; # TODO: remove this at some point
+use JSON qw( encode_json );
+
 # george caley presents:
 # perl2python
 # a COMP2041 assignment
@@ -53,12 +56,26 @@ use constant STATES => qw(
 	STATE_NUMBER
 );
 
-# tokens are stored as arrays/tuples/something
-# (type, value)
-# or just (type) for shitty things maybe
+# tokens are stored as hashes of type and value
+
+sub makeToken {
+	my $type = shift;
+
+	my $token = {};
+	$token->{"type"} = $type;
+
+	my $value = shift;
+	if (defined $value) {
+		$token->{"value"} = $value;
+	}
+
+	#print "making token ", %$token, "\n";
+
+	return $token;
+}
 
 sub tokenise {
-	$data = shift;
+	my $data = shift;
 
 	# data is just the text from the python file
 	# it's now our job to chop it up into tokens
@@ -66,33 +83,31 @@ sub tokenise {
 
 	# add newline to data (makes detecting the end of the last line easier)
 	$data .= "\n";
-	@chars = split(//, $data);
+	my @chars = split(//, $data);
 
 	# initialise state machine
-	$state = STATE_IDLE;
+	my $state = STATE_IDLE;
 
 	# initialise token array
-	@tokens = ();
+	my @tokens = ();
 
 	# here is a string to store token value
-	$value = "";
+	my $value = "";
 
 	# initialise current char counter
-	$i = 0;
+	my $i = 0;
 
 	while ($i < @chars) {
 
-		$curr = $chars[$i]; # current char
-		$next = $chars[$i+1]; # next char
+		my $curr = $chars[$i]; # current char
+		my $next = $chars[$i+1]; # next char
+
+		my $token;
 
 		if ($state eq STATE_IDLE) {
 			if (defined $singleCharTokens{$curr}) {
 				# use a single char token mapping
-				@token = (
-					$singleCharTokens{$curr}
-				);
-
-				push @tokens, [@token];
+				push @tokens, makeToken($singleCharTokens{$curr});
 				# remain in the idle state
 			} elsif ($curr eq "#") {
 				# start reading comment
@@ -100,69 +115,49 @@ sub tokenise {
 			} elsif ($curr eq "=") {
 				# is it double equals?
 				if ($next eq "=") {
-					@token = (
-						DOUBLEEQUALS
-					);
+					$token = makeToken(DOUBLEEQUALS);
 					$i++;
 				} elsif ($next eq ">") {
-					@token = (
-						POINT
-					);
+					$token = makeToken(POINT);
 					$i++;
 				} elsif ($next eq "~") {
-					@token = (
-						MATCH
-					);
+					$token = makeToken(MATCH);
 					$i++;
 				} else {
-					@token = (
-						EQUALS
-					);
+					$token = makeToken(EQUALS);
 				}
 
-				push @tokens, [@token];
+				push @tokens, $token;
 			} elsif ($curr eq "*") {
 				# is it pow?
 				if ($next eq "*") {
-					@token = (
-						POW
-					);
+					$token = makeToken(POW);
 					$i++;
 				} else {
-					@token = (
-						MUL
-					);
+					$token = makeToken(MUL);
 				}
 
-				push @tokens, [@token];
+				push @tokens, $token;
 			} elsif ($curr eq "+") {
 				# is it increment?
 				if ($next eq "+") {
-					@token = (
-						INCREMENT
-					);
+					$token = makeToken(INCREMENT);
 					$i++;
 				} else {
-					@token = (
-						PLUS
-					);
+					$token = makeToken(PLUS);
 				}
 
-				push @tokens, [@token];
+				push @tokens, $token;
 			} elsif ($curr eq "-") {
 				# is it decrement?
 				if ($next eq "-") {
-					@token = (
-						DECREMENT
-					);
+					$token = makeToken(DECREMENT);
 					$i++;
 				} else {
-					@token = (
-						MINUS
-					);
+					$token = makeToken(MINUS);
 				}
 
-				push @tokens, [@token];
+				push @tokens, $token;
 			} elsif ($curr eq '"' || $curr eq "'") {
 				# start reading string
 				$state = STATE_STRING;
@@ -190,12 +185,8 @@ sub tokenise {
 		} elsif ($state eq STATE_COMMENT) {
 			if ($curr eq "\n") {
 				# newline! end of comment
-				@token = (
-					COMMENT,
-					$value
-				);
+				push @tokens, makeToken(COMMENT, $value);
 
-				push @tokens, [@token];
 				$state = STATE_IDLE;
 				$value = "";
 			} else {
@@ -206,12 +197,8 @@ sub tokenise {
 			# keep reading until we hit the end quote
 			if ($curr eq $separator) {
 				# we're done
-				@token = (
-					STRING,
-					$value
-				);
+				push @tokens, makeToken(STRING, $value);
 
-				push @tokens, [@token];
 				$state = STATE_IDLE;
 				$value = "";
 			} elsif ($curr eq "\\") {
@@ -248,12 +235,8 @@ sub tokenise {
 					$type = HASH;
 				}
 
-				@token = (
-					$type,
-					$value
-				);
+				push @tokens, makeToken($type, $value);
 
-				push @tokens, [@token];
 				$state = STATE_IDLE;
 				$value = "";
 			}
@@ -263,12 +246,8 @@ sub tokenise {
 
 			if (!($next =~ /[A-Za-z0-9_]/)) {
 				# end of function name
-				@token = (
-					WORD,
-					$value
-				);
+				push @tokens, makeToken(WORD, $value);
 
-				push @tokens, [@token];
 				$state = STATE_IDLE;
 				$value = "";
 			}
@@ -278,12 +257,8 @@ sub tokenise {
 
 			if (!($next =~ /[0-9]/)) {
 				# end of number
-				@token = (
-					NUMBER,
-					$value
-				);
+				push @tokens, makeToken(NUMBER, $value);
 
-				push @tokens, [@token];
 				$state = STATE_IDLE;
 				$value = "";
 			}
@@ -299,7 +274,169 @@ sub tokenise {
 
 # --== PARSER ==--
 
+use constant AST_NODES => qw(
+	NODE_STATEMENTS
+	NODE_COMMENT
+	NODE_CALL
+);
+
+# the parser operates on a few global variables
+# the token array and the current token counter
+@tokens = ();
+$upto = 0;
+
 sub parse {
+	my $statements_ref = parse_statements();
+
+	my %node = (
+		"type" => NODE_STATEMENTS,
+		"children" => $statements_ref
+	);
+
+	return \%node;
+}
+
+sub parse_statements {
+	# parse numerous statements
+	# TODO: if/while loops
+
+	my @statements = ();
+
+	while ($upto <= $#tokens) {
+		push @statements, parse_statement();
+	}
+
+	return \@statements;
+}
+
+sub parse_statement {
+	# parse a single statement
+
+	# the only thing that exists so far is calls
+	my $call_ref = parse_call();
+
+	# consume semicolon
+	# om nom nom
+	if ($upto <= $#tokens) {
+		my %curr = %{$tokens[$upto]};
+		($curr{"type"} eq SEMICOLON) or die "Expecting semicolon";
+		$upto++;
+	}
+
+	return $call_ref;
+}
+
+sub parse_call {
+	# get the name of the call
+	my %curr = %{$tokens[$upto]};
+	my $name = $curr{"value"};
+	print "parsing call $name\n";
+	$upto++;
+
+	# parse arguments
+	my $args_ref = parse_args();
+
+	# assemble a node
+	my %node = (
+		"type" => NODE_CALL,
+		"name" => $name,
+		"children" => $args_ref
+	);
+
+	return \%node;
+}
+
+sub parse_args {
+	# we'll know we're at the end when we hit either:
+	# (1) closing parenthesis (assuming there was an opening one)
+	# (2) semicolon
+
+	# initialise array of args
+	my @args = ();
+
+	# check for parentheses
+	my $parentheses = 0;
+
+	my %curr = %{$tokens[$upto]};
+	if ($curr{"type"} eq PARENTHESIS_OPEN) {
+		$parentheses = 1;
+		$upto++;
+	}
+
+	my $first = 1;
+
+	while ($upto <= $#tokens) {
+		my %curr = %{$tokens[$upto]};
+		my %next;
+
+		if ($upto < $#tokens) {
+			%next = %{$tokens[$upto+1]};
+		} else {
+			undef %next;
+		}
+
+		if ($curr{"type"} eq PARENTHESIS_CLOSE) {
+			# ...were we expecting it?
+			if ($parentheses) {
+				# consume the closing parenthesis
+				$upto++;
+				last;
+			} else {
+				# end anyway, but don't consume anything
+				# nested functions, what even
+				last;
+			}
+		} elsif ($curr{"type"} eq SEMICOLON) {
+			# don't actually eat the semicolon, leave that to parse_statement
+			last;
+		} else {
+			# must be an argument
+			# if it's not the first arg, we need to consume the comma too
+			if (!$first) {
+				($curr{"type"} eq COMMA) or die "Expecting comma";
+				$upto++;
+			}
+			
+			push @args, parse_arg();
+		}
+
+		$first = 0;
+	}
+
+	# return the arguments (by reference)
+	return \@args;
+}
+
+sub parse_arg {
+	# wtf is an arg
+	#my %curr = %{$tokens[$upto]};
+	#print "reading arg ", $curr{"type"}, "\n";
+
+	#print "the fuck is ", $curr{"type"}, "!?\n";
+	#die;
+	#return $tokens[$upto];
+	return parse_expr();
+}
+
+sub parse_expr {
+	my %curr = %{$tokens[$upto]};
+
+	print "reading expr, starting with ", $curr{"type"}, "\n";
+
+	# is it a call?
+	if ($curr{"type"} eq WORD) {
+		return parse_call();
+	}
+
+	# is it a variable?
+	if ($curr{"type"} eq SCALAR) {
+		$upto++;
+		return \%curr;
+	}
+
+	# must be a literal
+	$upto++;
+	return \%curr;
 }
 
 # --== MAIN STUFF ==--
@@ -320,18 +457,14 @@ foreach $file (@files) {
 		$data .= $_;
 	}
 
+	# initialise parser shiz
 	@tokens = tokenise($data);
+	$upto = 0;
 
-	foreach $token (@tokens) {
-		#foreach $thing (@$token) {
-		#	print "$thing ";
-		#}
-		#print "$token[0]\n";
-		if (@$token == 1) {
-			print "$token->[0]\n";
-		} else {
-			print "$token->[0]: $token->[1]\n";
-		}
-	}
+	#foreach $token (@tokens) {
+	#	print "token: $token ", %{$token}, "\n";
+	#}
 
+	$tree_ref = parse();
+	print Dumper($tree_ref);
 }

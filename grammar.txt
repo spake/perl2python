@@ -1,0 +1,39 @@
+here is the grammar for the lexer, which should hopefully be fairly basic and enough to transform the sequence of characters into a primitive syntax tree
+
+<name> ::= / (?aa) (?!\d) \w+ /x
+<scalar> ::= "$" <name>
+<array> ::= "@" <name>
+<hash> ::= "%" <name>
+<array_index> ::= "[" <expression> "]"
+<hash_index> ::= "{" <expression> "}"
+
+<string> ::= <single_string> | <double_string>
+<single_string> ::= "'" / ( [^\\] | \\'  ) * /x "'"
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+here's the grammar for the parser
+let's just pretend that + and - are the only arithmetic operations
+
+<statement> ::= <call> | <varmod> | <open> ";"
+
+<varmod> ::= <inc> | <dec> | <pluseq> | <minuseq>
+<inc> ::= <var> "++"
+<dec> ::= <var> "--"
+<pluseq> ::= <var> "+=" <expr>
+<minuseq> ::= <var> "-=" <expr>
+
+<expr> ::= <var>
+<expr> ::= <literal>
+<expr> ::= <call>
+<expr> ::= <expr> "+" <expr>
+<expr> ::= <expr> "-" <expr>
+
+<call> ::= <name> <arglist>
+<call> ::= <name> "(" <arglist> ")"
+<arglist> ::= <arg>
+<arglist> ::= <arg> "," <arglist>
+<arg> ::= <expr>
+
+REFERENCES:
+http://perldoc.perl.org/perldata.html#Variable-names
