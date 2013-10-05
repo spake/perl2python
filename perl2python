@@ -395,11 +395,13 @@ use constant AST_NODES => qw(
 	NODE_HASH
 
 	NODE_BLOCK
-	NODE_CONDITIONAL
-	NODE_WHILE_LOOP
-	NODE_FOR_LOOP
-	NODE_FOREACH_LOOP
-	NODE_FOR_RANGE_LOOP
+	NODE_IF
+	NODE_ELSEIF
+	NODE_ELSE
+	NODE_WHILE
+	NODE_FOR
+	NODE_FOREACH
+	NODE_FOR_RANGE
 
 	NODE_SECTIONS
 );
@@ -433,32 +435,137 @@ sub parse {
 	return \%node;
 }
 
-sub parse_conditional {
-	# consume the 'if'
+# this handles 'if', 'elsif' and 'while', since they're basically all the same thing
+sub parse_if {
+	# consume the type
+	my %curr = %{$tokens[$upto]};
+	my $if_type = $curr{"value"};
 	$upto++;
 
-	# parse the condition, with parentheses
-	$condition_ref = parse_expr();
+	# parse the condition, but skip parentheses
+	%curr = %{$tokens[$upto]};
+	($curr{"type"} eq PARENTHESIS_OPEN) or die "Expecting opening parenthesis";
+	$upto++;
+
+	my $condition_ref = parse_expr();
+
+	%curr = %{$tokens[$upto]};
+	($curr{"type"} eq PARENTHESIS_CLOSE) or die "Expecting closing parenthesis";
+	$upto++;
 
 	# parse the block
-	$block_ref = parse_block();
+	my $block_ref = parse_block();
 
 	my %node = (
-		"type" => NODE_CONDITIONAL,
 		"value" => $condition_ref,
+		"children" => [$block_ref]
+	);
+
+	if ($if_type eq "if") {
+		$node{"type"} = NODE_IF;
+	} elsif ($if_type eq "elsif") {
+		$node{"type"} = NODE_ELSEIF;
+	} elsif ($if_type eq "while") {
+		$node{"type"} = NODE_WHILE;
+	}
+
+	return \%node;
+}
+
+sub parse_else {
+	# consume the 'else'
+	$upto++;
+
+	# parse the block
+	my $block_ref = parse_block();
+
+	my %node = (
+		"type" => NODE_ELSE,
 		"children" => [$block_ref]
 	);
 
 	return \%node;
 }
 
+sub parse_for {
+	# consume the 'for' and its type
+	my %curr = %{$tokens[$upto]};
+	my $for_type = $curr{"value"};
+	$upto++;
+
+	my %node;
+
+	# several types we have to worry about:
+	# (1) for $i ($j..$k)
+	# (2) for ($j..$k) (with the anonymous variable)
+	# (3) for $i (@array)
+	# (4) for (@array) (with the anonymous variable)
+	# (5) for (statement; expression; statement)
+	# types 1-2 => for i in xrange(j, k)
+	# types 3-4 => for i in array
+	# type 5 => statement / while expression: / <block> / statement
+
+	# read the first token
+	%curr = %{$tokens[$upto]};
+	$upto++;
+
+	# is it a variable?
+	if ($curr{"type"} eq SCALAR) {
+		# so it's either type 1 or 3
+		# consume the parenthesis
+		%curr = %{$tokens[$upto]};
+		$upto++;
+		($curr{"type"} eq PARENTHESIS_OPEN) or die "Expected opening parenthesis";
+
+		# if it's an array, it's type 3
+		# otherwise type 1
+		%curr = %{$tokens[$upto]};
+
+		if ($curr{"type"} eq ARRAY) {
+			# consume array token
+			$upto++;
+
+			%node = (
+				"type" => NODE_FOREACH,
+				"value" => \%curr
+			);
+		} else {
+			# parse expressions
+			my $left_ref = parse_expr();
+
+			# consume range token (..)
+			%curr = %{$tokens[$upto]};
+			$upto++;
+			($curr{"type"} eq RANGE) or die "Expecting range symbol (..)";
+
+			my $right_ref = parse_expr();
+
+			%node = (
+				"type" => NODE_FOR_RANGE,
+				"value" => [$left_ref, $right_ref]
+			);
+		}
+
+		# consume the closing one too
+		%curr = %{$tokens[$upto]};
+		$upto++;
+		($curr{"type"} eq PARENTHESIS_CLOSE) or die "Expected closing parenthesis";
+	} else {
+
+		die "wat";
+
+	}
+}
+
 sub parse_block {
 	# can either be empty (a semicolon), a single line (another block), or {something in here}
+
+	print "reading block\n";
 
 	my %curr = %{$tokens[$upto]};
 	my $type = $curr{"type"};
 
-	my @children = ();
+	my $children = [];
 
 	if ($type eq SEMICOLON) {
 		# nothing to do here!
@@ -468,20 +575,22 @@ sub parse_block {
 		# consume opening brace
 		$upto++;
 
-		push @children, parse_block();
+		#push @children, parse_sections();
+		$children = parse_sections();
 
 		# consume the closing brace
 		%curr = %{$tokens[$upto]};
 		($curr{"type"} eq CURLY_CLOSE) or die "Expecting closing brace";
 		$upto++;
 	} else {
-		# another block!
-		push @children, parse_block();
+		# a single section!? wtf
+		#push @children, parse_sections();
+		$children = parse_sections();
 	}
 
 	my %node = (
-		"type" => NODE_BLOCK,
-		"children" => \@children
+		"type" => NODE_SECTIONS,
+		"children" => $children
 	);
 
 	return \%node;
@@ -504,25 +613,28 @@ sub parse_sections {
 			if (($name eq "for") ||
 				($name eq "foreach")) {
 				# for loop
-				# establish whether it's a three-statement type thing, or a foreach
-				die "TODO: for loops";
+				push @sections, parse_for();
 			} elsif ($name eq "while") {
 				# while loop
-				die "TODO: while loops";
+				push @sections, parse_if();
 			} elsif ($name eq "if") {
 				# if conditional
-				die "TODO: if statements";
+				#die "TODO: if statements";
+				push @sections, parse_if();
 			} elsif ($name eq "elsif") {
 				# else if
-				die "TODO: elsif";
+				push @sections, parse_if();
 			} elsif ($name eq "else") {
 				# else
-				die "TODO: else";
+				push @sections, parse_else();
 			} else {
 				# suppose it's none of the above then
 				# parse as a statement
 				push @sections, parse_statement();
 			}
+		} elsif ($type eq CURLY_CLOSE) {
+			# end of block!
+			last;
 		} else {
 			# parse as a statement. what else could it be?
 			push @sections, parse_statement();
@@ -804,7 +916,11 @@ sub parse_expr {
 		($type eq LOGICAL_OR) ||
 		($type eq CONCAT) ||
 		($type eq DOUBLE_EQUALS) ||
-		($type eq NOT_EQUALS)) {
+		($type eq NOT_EQUALS) ||
+		($type eq GREATER_THAN) ||
+		($type eq GREATER_EQUALS) ||
+		($type eq LESS_THAN) ||
+		($type eq LESS_EQUALS)) {
 
 		# consume operator
 		$upto++;
@@ -919,11 +1035,56 @@ sub compile {
 
 	if ($type eq NODE_SECTIONS) {
 
+		# won't somebody *please* think of the children!?
+		my @children = @{$node{"children"}};
+
 		# compile them one by one
-		for $statement (@{$node{"children"}}) {
-			$output .= compile($statement);
-			$output .= "\n";
+		#for $statement (@{$node{"children"}}) {
+		my @statements = @{$node{"children"}};
+
+		for $i (0..$#statements) {
+			$output .= $indent;
+			$output .= compile($statements[$i]);
+			if ($i < $#statements) {
+				$output .= "\n";
+			}
 		}
+
+		# was it empty!?
+		if (@{$node{"children"}} == 0) {
+			$output .= $indent;
+			$output .= "pass\n";
+		}
+
+	} elsif (($type eq NODE_IF) ||
+		     ($type eq NODE_ELSEIF) ||
+		     ($type eq NODE_ELSE) ||
+		     ($type eq NODE_WHILE)) {
+
+		# pre-existing indent level
+		#$output .= "if ";
+		my $block_type;
+		if ($type eq NODE_IF) {
+			$block_type = "if";
+		} elsif ($type eq NODE_ELSEIF) {
+			$block_type = "elif";
+		} elsif ($type eq NODE_ELSE) {
+			$block_type = "else";
+		} elsif ($type eq NODE_WHILE) {
+			$block_type = "while";
+		}
+
+		if ($type eq NODE_ELSE) {
+			$output .= $block_type;
+		} else {
+			$output .= "$block_type ";
+			$output .= compile($node{"value"});
+		}
+		$output .= ":\n";
+
+		$indent_level++;
+		$output .= compile($node{"children"}[0]);
+		$indent_level--;
 
 	} elsif ($type eq NODE_CALL) {
 
@@ -934,12 +1095,14 @@ sub compile {
 
 		if ($name eq "print") {
 			for $i (0..$#args) {
-				$output .= $indent;
+				if ($i > 0) { # first line will already have the indent
+					$output .= $indent;
+				}
 				$output .= "sys.stdout.write(str(";
 				$output .= compile($args[$i]);
 				$output .= ")";
 				$output .= ")";
-				if ($i < $#args) {
+				if ($i < $#args) { # last line won't need a newline
 					$output .= "\n";
 				}
 			}
@@ -1078,7 +1241,7 @@ foreach $file (@files) {
 
 	print "COMPILING\n\n";
 	$output = "import sys\n";
-	$output .= compile($tree_ref);
+	$output .= compile($tree_ref) . "\n";
 	print "\n\n";
 	print $output;
 
