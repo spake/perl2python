@@ -2,6 +2,7 @@
 
 use Data::Dumper; # TODO: remove this at some point
 use JSON qw( encode_json );
+use Switch;
 
 # george caley presents:
 # perl2python
@@ -17,7 +18,7 @@ use constant TOKENS => qw(
 	STRING
 	NUMBER
 	SEMICOLON
-	EQUALS DOUBLEEQUALS POINT MATCH
+	EQUALS DOUBLE_EQUALS POINT MATCH
 	GREATER_THAN GREATER_EQUALS LESS_THAN LESS_EQUALS
 	NOT_EQUALS LOGICAL_NOT
 	SHIFT_LEFT SHIFT_RIGHT
@@ -31,7 +32,12 @@ use constant TOKENS => qw(
 	MINUS DECREMENT
 	MUL POW
 	DIV
+	CONCAT
+	REASSIGN
+	RANGE
 );
+# 'reassign' is a special token that can succeed operations
+# just a hacky way of dealing with +=, -=, *=, &=, etc.
 
 # single char token mappings
 # this will hopefully clean up the lexer code a bit
@@ -46,9 +52,7 @@ use constant TOKENS => qw(
 	"{" => CURLY_OPEN,
 	"}" => CURLY_CLOSE,
 	"," => COMMA,
-	"/" => DIV,
-	"^" => XOR,
-	"~" => BIT_NOT
+	"/" => DIV
 );
 
 # tokeniser states
@@ -108,6 +112,7 @@ sub tokenise {
 
 		my $curr = $chars[$i]; # current char
 		my $next = $chars[$i+1]; # next char
+		my $next2 = $chars[$i+2]; # next *next* char!
 
 		my $token;
 
@@ -122,7 +127,7 @@ sub tokenise {
 			} elsif ($curr eq "=") {
 				# is it double equals?
 				if ($next eq "=") {
-					$token = makeToken(DOUBLEEQUALS);
+					$token = makeToken(DOUBLE_EQUALS);
 					$i++;
 				} elsif ($next eq ">") {
 					$token = makeToken(POINT);
@@ -170,52 +175,90 @@ sub tokenise {
 				push @tokens, $token;
 			} elsif ($curr eq "&") {
 				if ($next eq "&") {
-					$token = makeToken(LOGICAL_AND);
+					push @tokens, makeToken(LOGICAL_AND);
 					$i++;
 				} else {
-					$token = makeToken(BIT_AND);
+					push @tokens, makeToken(BIT_AND);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq "|") {
 				if ($next eq "|") {
-					$token = makeToken(LOGICAL_OR);
+					push @tokens, makeToken(LOGICAL_OR);
 					$i++;
 				} else {
-					$token = makeToken(BIT_OR);
+					push @tokens, makeToken(BIT_OR);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq "*") {
 				# is it pow?
 				if ($next eq "*") {
-					$token = makeToken(POW);
+					push @tokens, makeToken(POW);
 					$i++;
-				} else {
-					$token = makeToken(MUL);
-				}
 
-				push @tokens, $token;
+					if ($next2 eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
+				} else {
+					push @tokens, makeToken(MUL);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
+				}
 			} elsif ($curr eq "+") {
 				# is it increment?
 				if ($next eq "+") {
-					$token = makeToken(INCREMENT);
+					push @tokens, makeToken(INCREMENT);
 					$i++;
 				} else {
-					$token = makeToken(PLUS);
+					push @tokens, makeToken(PLUS);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq "-") {
 				# is it decrement?
 				if ($next eq "-") {
-					$token = makeToken(DECREMENT);
+					push @tokens, makeToken(DECREMENT);
 					$i++;
 				} else {
-					$token = makeToken(MINUS);
+					push @tokens, makeToken(MINUS);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
 				}
-
-				push @tokens, $token;
+			} elsif ($curr eq "^") {
+				push @tokens, makeToken(XOR);
+				if ($next eq "=") {
+					push @tokens, makeToken(REASSIGN);
+					$i++;
+				}
+			} elsif ($curr eq "~") {
+				push @tokens, makeToken(BIT_NOT);
+				if ($next eq "=") {
+					push @tokens, makeToken(REASSIGN);
+					$i++;
+				}
+			} elsif ($curr eq ".") {
+				if ($next eq ".") {
+					push @tokens, makeToken(RANGE);
+					$i++;
+				} else {
+					push @tokens, makeToken(CONCAT);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
+				}
 			} elsif ($curr eq '"' || $curr eq "'") {
 				# start reading string
 				$state = STATE_STRING;
@@ -344,11 +387,34 @@ sub tokenise {
 use constant AST_NODES => qw(
 	NODE_STATEMENTS
 	NODE_COMMENT
+	NODE_ASSIGNMENT
+	NODE_EXPRESSION
 	NODE_CALL
 	NODE_VARIABLE
 	NODE_ARRAY
 	NODE_HASH
+
+	NODE_BLOCK
+	NODE_CONDITIONAL
+	NODE_WHILE_LOOP
+	NODE_FOR_LOOP
+	NODE_FOREACH_LOOP
+	NODE_FOR_RANGE_LOOP
+
+	NODE_SECTIONS
 );
+
+# everything here is basically self explanatory (I hope!)
+# all nodes have a type
+# for container nodes/other special stuff, it'll be one of the above nodes
+# for more simple stuff that doesn't warrant translation, it'll be the same types as tokens
+
+# some things have names
+# e.g. for variables, this is the name of the variable (duh)
+# for assignments, this is the variable that the result is stored in (maybe not so 'duh')
+# container nodes also have children
+
+# conditionals/loops store the condition within value, and the block (single child) within children
 
 # the parser operates on a few global variables
 # the token array and the current token counter
@@ -356,14 +422,115 @@ use constant AST_NODES => qw(
 $upto = 0;
 
 sub parse {
-	my $statements_ref = parse_statements();
+	#my $statements_ref = parse_statements();
+	my $sections_ref = parse_sections();
 
 	my %node = (
-		"type" => NODE_STATEMENTS,
-		"children" => $statements_ref
+		"type" => NODE_SECTIONS,
+		"children" => $sections_ref
 	);
 
 	return \%node;
+}
+
+sub parse_conditional {
+	# consume the 'if'
+	$upto++;
+
+	# parse the condition, with parentheses
+	$condition_ref = parse_expr();
+
+	# parse the block
+	$block_ref = parse_block();
+
+	my %node = (
+		"type" => NODE_CONDITIONAL,
+		"value" => $condition_ref,
+		"children" => [$block_ref]
+	);
+
+	return \%node;
+}
+
+sub parse_block {
+	# can either be empty (a semicolon), a single line (another block), or {something in here}
+
+	my %curr = %{$tokens[$upto]};
+	my $type = $curr{"type"};
+
+	my @children = ();
+
+	if ($type eq SEMICOLON) {
+		# nothing to do here!
+		# except consume it, of course.
+		$upto++;
+	} elsif ($type eq CURLY_OPEN) {
+		# consume opening brace
+		$upto++;
+
+		push @children, parse_block();
+
+		# consume the closing brace
+		%curr = %{$tokens[$upto]};
+		($curr{"type"} eq CURLY_CLOSE) or die "Expecting closing brace";
+		$upto++;
+	} else {
+		# another block!
+		push @children, parse_block();
+	}
+
+	my %node = (
+		"type" => NODE_BLOCK,
+		"children" => \@children
+	);
+
+	return \%node;
+}
+
+sub parse_sections {
+	# parse numerous sections
+
+	my @sections = ();
+
+	while ($upto <= $#tokens) {
+
+		my %curr = %{$tokens[$upto]};
+		my $type = $curr{"type"};
+
+		# are we looking at a conditional, loop, or statement?
+		if ($type eq WORD) {
+			# could be...
+			$name = $curr{"value"};
+			if (($name eq "for") ||
+				($name eq "foreach")) {
+				# for loop
+				# establish whether it's a three-statement type thing, or a foreach
+				die "TODO: for loops";
+			} elsif ($name eq "while") {
+				# while loop
+				die "TODO: while loops";
+			} elsif ($name eq "if") {
+				# if conditional
+				die "TODO: if statements";
+			} elsif ($name eq "elsif") {
+				# else if
+				die "TODO: elsif";
+			} elsif ($name eq "else") {
+				# else
+				die "TODO: else";
+			} else {
+				# suppose it's none of the above then
+				# parse as a statement
+				push @sections, parse_statement();
+			}
+		} else {
+			# parse as a statement. what else could it be?
+			push @sections, parse_statement();
+		}
+
+	}
+
+	return \@sections;
 }
 
 sub parse_statements {
@@ -382,18 +549,95 @@ sub parse_statements {
 sub parse_statement {
 	# parse a single statement
 
-	# the only thing that exists so far is calls
-	my $call_ref = parse_call();
+	my %curr = %{$tokens[$upto]};
+	my $type = $curr{"type"};
+
+	my $node_ref;
+
+	if ($type eq COMMENT) {
+		$node_ref = \%curr;
+		$upto++;
+	} elsif ($type eq SCALAR) {
+		# varmod
+		$node_ref = parse_varmod();
+	} else {
+		# default to expression
+		#$node_ref = parse_call();
+		$node_ref = parse_expr();
+	}
 
 	# consume semicolon
 	# om nom nom
-	if ($upto <= $#tokens) {
-		my %curr = %{$tokens[$upto]};
+	if ($upto <= $#tokens && !($type eq COMMENT)) {
+		%curr = %{$tokens[$upto]};
 		($curr{"type"} eq SEMICOLON) or die "Expecting semicolon";
 		$upto++;
 	}
 
-	return $call_ref;
+	return $node_ref;
+}
+
+sub parse_varmod {
+	# some kind of statement intended to modify a variable
+
+	print "reading varmod\n";
+
+	# they all start with a var...
+	my $var_ref = parse_var();
+
+	# ...then some kind of operation...
+	my %op = %{$tokens[$upto]};
+	my %op2 = %{$tokens[$upto+1]}; # the token after the op
+	my $type = $op{"type"};
+	my $type2 = $op2{"type"};
+	$upto++; # read the op
+
+	my $newvalue_ref;
+
+	if ($type eq EQUALS) {
+		# plain old assignment
+		$newvalue_ref = parse_expr();
+	} elsif (($type eq INCREMENT) ||
+		     ($type eq DECREMENT)) {
+		# create an assignment of the form
+		# <var> = <var> + 1
+		$one_ref = makeToken(NUMBER);
+		$one_ref->{"value"} = 1;
+
+		my $op_ref;
+		if ($type eq INCREMENT) {
+			$op_ref = makeToken(PLUS);
+		} elsif ($type eq DECREMENT) {
+			$op_ref = makeToken(MINUS);
+		}
+
+		$newvalue_ref = {
+			"type" => NODE_EXPRESSION,
+			"value" => $op_ref,
+			"children" => [$var_ref, $one_ref]
+		};
+	} elsif ($type2 eq REASSIGN) {
+		# create an assignment of the form
+		# <var> = <var> <op> <expr>
+		$upto++; # skip reassign
+		$newvalue_ref = {
+			"type" => NODE_EXPRESSION,
+			"value" => \%op,
+			"children" => [$var_ref, parse_expr()]
+		};
+	} else {
+		die "i dunno lol";
+	}
+
+	#@children = ($var_ref, $newvalue_ref);
+
+	my %node = (
+		"type" => NODE_ASSIGNMENT,
+		"name" => $var_ref,
+		"value" => $newvalue_ref
+	);
+
+	return \%node;
 }
 
 sub parse_call {
@@ -487,19 +731,98 @@ sub parse_expr {
 
 	print "reading expr, starting with ", $curr{"type"}, "\n";
 
-	# is it a call?
-	if ($curr{"type"} eq WORD) {
-		return parse_call();
+	my $left_ref;
+	
+	if ($curr{"type"} eq WORD) { # is it a call?
+
+		$left_ref = parse_call();
+	
+	} elsif (($curr{"type"} eq SCALAR) ||
+		     ($curr{"type"} eq ARRAY) ||
+		     ($curr{"type"} eq HASH)) { # is it a variable?
+		
+		$left_ref = parse_var();
+
+	} elsif (($curr{"type"} eq LOGICAL_NOT) ||
+		     ($curr{"type"} eq BIT_NOT)) { # is it a unary operator?
+
+		# consuuuuuume the operator
+		$upto++;
+
+		$left_ref = parse_expr();
+
+		my %node = (
+			"type" => NODE_EXPRESSION,
+			"value" => \%curr, # operator
+			"children" => [$left_ref]
+		);
+
+		return \%node;
+
+	} elsif ($curr{"type"} eq PARENTHESIS_OPEN) { # is it a parenthesis?
+
+		# delicious parentheses
+		$upto++;
+
+		$left_ref = parse_expr();
+
+		my %node = (
+			"type" => NODE_EXPRESSION,
+			"value" => \%curr,
+			"children" => [$left_ref]
+		);
+
+		# i'm still hungry; eat the right parenthesis as well
+		%curr = %{$tokens[$upto]};
+		($curr{"type"} eq PARENTHESIS_CLOSE) or die "Expecting closing parenthesis";
+		$upto++;
+
+		# new left ref is the contents of the grouping
+		# we need to check if this is part of a larger expression!
+		$left_ref = \%node;
+
+	} else {
+		# default to literal
+		$upto++;
+		$left_ref = \%curr;
 	}
 
-	# is it a variable?
-	if (($curr{"type"} eq SCALAR) || ($curr{"type"} eq ARRAY) || ($curr{"type"} eq HASH)) {
-		return parse_var();
-	}
+	# check for an operator
+	my %op = %{$tokens[$upto]};
+	my $type = $op{"type"};
 
-	# must be a literal
-	$upto++;
-	return \%curr;
+	# check for binary operators
+	if (($type eq PLUS) ||
+		($type eq MINUS) ||
+		($type eq MUL) ||
+		($type eq DIV) ||
+		($type eq POW) ||
+		($type eq BIT_OR) ||
+		($type eq BIT_AND) ||
+		($type eq XOR) ||
+		($type eq LOGICAL_AND) ||
+		($type eq LOGICAL_OR) ||
+		($type eq CONCAT) ||
+		($type eq DOUBLE_EQUALS) ||
+		($type eq NOT_EQUALS)) {
+
+		# consume operator
+		$upto++;
+
+		my $right_ref = parse_expr();
+
+		my %node = (
+			"type" => NODE_EXPRESSION,
+			"value" => \%op,
+			"children" => [$left_ref, $right_ref]
+		);
+
+		return \%node;
+
+	} else {
+		# just return the left of the expression, nothing else to see here
+		return $left_ref;
+	}
 }
 
 sub parse_var {
@@ -553,6 +876,36 @@ sub parse_var {
 $indent_level = 0;
 use constant INDENT => "  ";
 
+sub op_to_string {
+	my $op_ref = shift;
+	my $type = $op_ref->{"type"};
+
+	switch ($type) {
+		case PLUS			{ return "+" }
+		case MINUS			{ return "-" }
+		case MUL			{ return "*" }
+		case DIV			{ return "/" }
+		case POW			{ return "**" }
+		case CONCAT			{ return "+" }
+		case BIT_AND		{ return "&" }
+		case BIT_OR			{ return "|" }
+		case BIT_NOT		{ return "~" }
+		case XOR			{ return "^" }
+		case LOGICAL_AND	{ return "and" }
+		case LOGICAL_OR		{ return "or" }
+		case LOGICAL_NOT	{ return "not" }
+
+		case DOUBLE_EQUALS	{ return "==" }
+		case NOT_EQUALS		{ return "!=" }
+		case GREATER_THAN	{ return ">" }
+		case GREATER_EQUALS { return ">=" }
+		case LESS_THAN		{ return "<" }
+		case LESS_EQUALS	{ return "<=" }
+
+		else				{ die "Unexpected operator" }
+	} 
+}
+
 sub compile {
 	# argument will just be the root of the AST
 
@@ -564,11 +917,12 @@ sub compile {
 	my $output = "";
 	my $indent = INDENT x $indent_level;
 
-	if ($type eq NODE_STATEMENTS) {
+	if ($type eq NODE_SECTIONS) {
 
 		# compile them one by one
 		for $statement (@{$node{"children"}}) {
 			$output .= compile($statement);
+			$output .= "\n";
 		}
 
 	} elsif ($type eq NODE_CALL) {
@@ -581,12 +935,25 @@ sub compile {
 		if ($name eq "print") {
 			for $i (0..$#args) {
 				$output .= $indent;
-				$output .= "sys.stdout.write( str( ";
+				$output .= "sys.stdout.write(str(";
 				$output .= compile($args[$i]);
-				$output .= " ) ";
 				$output .= ")";
-				$output .= "\n";
+				$output .= ")";
+				if ($i < $#args) {
+					$output .= "\n";
+				}
 			}
+		} else {
+			# ordinary function call
+			$output .= $name;
+			$output .= "(";
+			for $i (0..$#args) {
+				$output .= compile($args[$i]);
+				if ($i < $#args) {
+					$output .= ", ";
+				}
+			}
+			$output .= ")";
 		}
 
 	} elsif ($type eq STRING) {
@@ -595,6 +962,77 @@ sub compile {
 		my $value = $node{"value"};
 		$value =~ s/"/\\"/;
 		$output .= '"' . $value . '"';
+
+	} elsif ($type eq NUMBER) {
+
+		$output .= $node{"value"};
+
+	} elsif ($type eq COMMENT) {
+
+		$output .= $indent;
+		$output .= "#";
+		$output .= $node{"value"};
+		#$output .= "\n";
+
+	} elsif ($type eq NODE_VARIABLE) {
+
+		if (defined $node{"index"}) {
+			$output .= $node{"name"};
+			$output .= "[";
+			$output .= compile($node{"index"});
+			$output .= "]";
+		} else {
+			$output .= $node{"name"};
+		}
+
+	} elsif ($type eq NODE_ASSIGNMENT) {
+
+		my $left_ref = $node{"name"};
+		my $right_ref = $node{"value"};
+
+		$output .= compile($left_ref);
+		$output .= " = ";
+		$output .= compile($right_ref);
+		#$output .= "\n";
+
+	} elsif ($type eq NODE_EXPRESSION) {
+
+		# oh boy, shit gets weird here...
+		# hands up who likes an excessive number of parentheses?
+
+		my @operands = @{$node{"children"}};
+
+		# is it a grouping?
+		if ($node{"value"}{"type"} eq PARENTHESIS_CLOSE) {
+			# daaaamn this is hax.
+			$output .= "(";
+			$output .= compile($operands[0]);
+			$output .= ")";
+		} else {
+
+			my $opstring = op_to_string($node{"value"});
+
+			if (@operands == 2) {
+
+				# binary operator
+				$output .= compile($operands[0]);
+				$output .= " $opstring ";
+				$output .= compile($operands[1]);
+
+			} elsif (@operands == 1) {
+				# unary operator
+				$output .= "$opstring ";
+				$output .= compile($operands[0]);
+			} else {
+				die "Unexpected number of operands";
+			}
+
+		}
+
+	} else {
+
+		die "Unable to compile $type";
+
 	}
 
 	return $output;
@@ -618,17 +1056,27 @@ foreach $file (@files) {
 		$data .= $_;
 	}
 
+	print "\n", "-" x 50, "\n";
+
 	# initialise parser shiz
 	@tokens = tokenise($data);
 	$upto = 0;
+	print "TOKENISING\n\n";
+	print Dumper(\@tokens);
+	print "\n", "-" x 50, "\n";
 
 	#foreach $token (@tokens) {
 	#	print "token: $token ", %{$token}, "\n";
 	#}
 
 	$tree_ref = parse();
+	print "PARSING\n\n";
 	print Dumper($tree_ref);
+	print "\n", "-" x 50, "\n";
 
+	#next;
+
+	print "COMPILING\n\n";
 	$output = "import sys\n";
 	$output .= compile($tree_ref);
 	print "\n\n";

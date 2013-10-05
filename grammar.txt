@@ -13,17 +13,37 @@ here is the grammar for the lexer, which should hopefully be fairly basic and en
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 here's the grammar for the parser
-let's just pretend that + and - are the only arithmetic operations
+let's just pretend that + and - are the only binary operators,
+and that ! is the only unary operator
+because this assignment is not about developing a formal definition of perl from scratch...
 
-<statement> ::= <call> | <varmod> | <open> ";"
+<program> ::= <sectionlist>
+
+<section> ::= <statementlist> | <conditional> | <loop>
+<sectionlist> ::= <section> <section>
+
+<conditional> ::= "if" <expr> <block>
+<loop> ::= <whileloop> | <forloop> | <foreachloop> | <forrangeloop>
+<whileloop> ::= "while" <expr> <block>
+<forloop> ::= "for (" <varmod> ";" <expr> ";" <expr> ")" <block>
+<foreachloop> ::= ("for" | "foreach") (<scalar>)? "(" <forexpr> ")" <block>
+
+<forexpr> ::= <expr>
+<forexpr> ::= <expr> ".." <expr>
+
+<block> ::= "{" <sectionlist> "}"
+
+<statement> ::= (<expr> | <varmod> | <open>) ";"
+<statement> ::= <comment>
 <statementlist> ::= <statement>
 <statementlist> ::= <statementlist> <statementlist>
 
-<varmod> ::= <inc> | <dec> | <pluseq> | <minuseq>
+<varmod> ::= <inc> | <dec> | <pluseq> | <minuseq> | <assignment>
 <inc> ::= <var> "++"
 <dec> ::= <var> "--"
 <pluseq> ::= <var> "+=" <expr>
 <minuseq> ::= <var> "-=" <expr>
+<assignment> ::= <var> "=" <expr>
 
 <expr> ::= <var>
 <expr> ::= <literal>
@@ -31,6 +51,8 @@ let's just pretend that + and - are the only arithmetic operations
 <expr> ::= <arraydecl> | <hashdecl>
 <expr> ::= <expr> "+" <expr>
 <expr> ::= <expr> "-" <expr>
+<expr> ::= "!" <expr>
+<expr> ::= "(" <expr> ")"
 
 <var> ::= <scalar>
 <var> ::= <array>
