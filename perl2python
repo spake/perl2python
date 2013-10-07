@@ -1,12 +1,13 @@
 #!/usr/bin/perl -w
 
 use Data::Dumper; # TODO: remove this at some point
-use JSON qw( encode_json );
 use Switch;
 
 # george caley presents:
 # perl2python
 # a COMP2041 assignment
+
+$debug = 0; # dumps the results of tokenisation and parsing
 
 # --== LEXER ==--
 
@@ -89,6 +90,11 @@ sub makeToken {
 	return $token;
 }
 
+# string interpolation requires a weird call to the tokeniser
+# we want to keep track of the index of the last variable or closing square/curly bracket
+$last_interpolation_index = 0;
+$interpolating = 0;
+
 sub tokenise {
 	my $data = shift;
 
@@ -112,21 +118,50 @@ sub tokenise {
 	# initialise current char counter
 	my $i = 0;
 
+	# nesting level, for interpolation shiz
+	# (i'm crying myself to sleep at this stage)
+	my $nesting = 0;
+
 	my $seen_comment = 0;
 
 	while ($i < @chars) {
 
 		my $curr = $chars[$i]; # current char
-		my $next = $chars[$i+1]; # next char
-		my $next2 = $chars[$i+2]; # next *next* char!
+		my $next = "";
+		my $next2 = "";
+
+		if ($i+1 <= $#chars) {
+			$next = $chars[$i+1]; # next char
+		}
+		if ($i+2 <= $#chars) {
+			$next2 = $chars[$i+2]; # next *next* char!
+		}
 
 		my $token;
 
 		if ($state eq STATE_IDLE) {
+			# if we're interpolating, be sure not to enter into another variable
+			# this interpolation code is the worst thing i've ever done in my life, i think
+			if ($interpolating && $i > 0 && $nesting == 0 && !($curr eq "{" || $curr eq "[")) {
+				last;
+			}
+
 			if (defined $singleCharTokens{$curr}) {
 				# use a single char token mapping
 				push @tokens, makeToken($singleCharTokens{$curr});
 				# remain in the idle state
+
+				# check if we need to update last_interpolation_index
+				if (($curr eq "}") || ($curr eq "]")) {
+					$last_interpolation_index = $i;
+					$nesting--;
+
+					if ($nesting == 0 && $interpolating) {
+						last;
+					}
+				} elsif (($curr eq "{") || ($curr eq "[")) {
+					$nesting++;
+				}
 			} elsif ($curr eq "#") {
 				# start reading comment
 				$state = STATE_COMMENT;
@@ -263,6 +298,10 @@ sub tokenise {
 				if ($next eq ".") {
 					push @tokens, makeToken(RANGE);
 					$i++;
+				} elsif ($next =~ /[0-9]/) {
+					# start reading a number
+					$state = STATE_NUMBER;
+					next;
 				} else {
 					push @tokens, makeToken(CONCAT);
 					if ($next eq "=") {
@@ -288,7 +327,7 @@ sub tokenise {
 				$state = STATE_WORD;
 				next;
 				#$value .= $curr;
-			} elsif ($curr =~ /[0-9]/) {
+			} elsif ($curr =~ /[0-9.]/) {
 				# start reading number
 				$state = STATE_NUMBER;
 				next;
@@ -378,6 +417,7 @@ sub tokenise {
 					}
 
 					push @tokens, makeToken($type, $value);
+					$last_interpolation_index = $i;
 
 					$state = STATE_IDLE;
 					$value = "";
@@ -398,17 +438,17 @@ sub tokenise {
 				} elsif ($value eq "not") {
 					push @tokens, makeToken(LOGICAL_NOT);
 				} elsif ($value eq "eq") {
-					push @tokens, makeToken(DOUBLE_EQUALS);
+					push @tokens, makeToken(DOUBLE_EQUALS, STRING);
 				} elsif ($value eq "ne") {
-					push @tokens, makeToken(NOT_EQUALS);
+					push @tokens, makeToken(NOT_EQUALS, STRING);
 				} elsif ($value eq "gt") {
-					push @tokens, makeToken(GREATER_THAN);
+					push @tokens, makeToken(GREATER_THAN, STRING);
 				} elsif ($value eq "ge") {
-					push @tokens, makeToken(GREATER_EQUALS);
+					push @tokens, makeToken(GREATER_EQUALS, STRING);
 				} elsif ($value eq "lt") {
-					push @tokens, makeToken(LESS_THAN);
+					push @tokens, makeToken(LESS_THAN, STRING);
 				} elsif ($value eq "le") {
-					push @tokens, makeToken(LESS_EQUALS);
+					push @tokens, makeToken(LESS_EQUALS, STRING);
 				} else {
 					push @tokens, makeToken(WORD, $value);
 				}
@@ -420,7 +460,7 @@ sub tokenise {
 			# consume char
 			$value .= $curr;
 
-			if (!($next =~ /[0-9]/)) {
+			if (!($next =~ /[0-9.]/)) {
 				# end of number
 				push @tokens, makeToken(NUMBER, $value);
 
@@ -655,7 +695,7 @@ sub parse_for {
 sub parse_block {
 	# can either be empty (a semicolon), a single line (another block), or {something in here}
 
-	print "reading block\n";
+	#print "reading block\n";
 
 	my %curr = %{$tokens[$upto]};
 	my $type = $curr{"type"};
@@ -759,11 +799,18 @@ sub parse_statement {
 	if (!defined $ignore_semicolon) {
 		$ignore_semicolon = 0;
 	}
-	print "ignore $ignore_semicolon\n";
+	#print "ignore $ignore_semicolon\n";
 
 	my %curr = %{$tokens[$upto]};
-	my %next = %{$tokens[$upto+1]};
-	my %next2 = %{$tokens[$upto+2]};
+	my %next;
+	my %next2;
+
+	if ($upto+1 <= $#tokens) {
+		%next = %{$tokens[$upto+1]};
+	}
+	if ($upto+2 <= $#tokens) {
+		%next2 = %{$tokens[$upto+2]};
+	}
 
 	my $type = $curr{"type"};
 
@@ -776,10 +823,11 @@ sub parse_statement {
 	         ($type eq ARRAY) ||
 	         ($type eq HASH)) {
 		# varmod, maybe...
-		if (($next{"type"} eq EQUALS) ||
+		if (defined $next{"type"} &&
+			(($next{"type"} eq EQUALS) ||
 			($next{"type"} eq INCREMENT) ||
 			($next{"type"} eq DECREMENT) ||
-			($next2{"type"} eq REASSIGN)) {
+			(defined $next2{"type"} && $next2{"type"} eq REASSIGN))) {
 			$node_ref = parse_varmod();
 		} else {
 			$node_ref = parse_expr();
@@ -809,7 +857,7 @@ sub parse_statement {
 sub parse_varmod {
 	# some kind of statement intended to modify a variable
 
-	print "reading varmod\n";
+	#print "reading varmod\n";
 
 	# they all start with a var...
 	my $var_ref = parse_var();
@@ -817,9 +865,15 @@ sub parse_varmod {
 
 	# ...then some kind of operation...
 	my %op = %{$tokens[$upto]};
-	my %op2 = %{$tokens[$upto+1]}; # the token after the op
 	my $type = $op{"type"};
-	my $type2 = $op2{"type"};
+
+	my %op2;
+	my $type2;
+
+	if ($upto+1 <= $#tokens) {
+		%op2 = %{$tokens[$upto+1]}; # the token after the op
+		$type2 = $op2{"type"};
+	}
 	$upto++; # read the op
 
 	my $newvalue_ref;
@@ -831,13 +885,13 @@ sub parse_varmod {
 			$newvalue_ref = parse_expr();
 		} elsif ($var_type eq NODE_ARRAY) {
 			# if there's a parenthesis, parse an array list
-			if ($type2 eq PARENTHESIS_OPEN) {
+			if (defined $type2 && $type2 eq PARENTHESIS_OPEN) {
 				$newvalue_ref = parse_array_list();
 			} else {
 				$newvalue_ref = parse_expr();
 			}
 		} elsif ($var_type eq NODE_HASH) {
-			if ($type2 eq PARENTHESIS_OPEN) {
+			if (defined $type2 && $type2 eq PARENTHESIS_OPEN) {
 				$newvalue_ref = parse_hash_list();
 			} else {
 				$newvalue_ref = parse_expr();
@@ -862,7 +916,7 @@ sub parse_varmod {
 			"value" => $op_ref,
 			"children" => [$var_ref, $one_ref]
 		};
-	} elsif ($type2 eq REASSIGN) {
+	} elsif (defined $type2 && $type2 eq REASSIGN) {
 		# create an assignment of the form
 		# <var> = <var> <op> <expr>
 		$upto++; # skip reassign
@@ -890,7 +944,7 @@ sub parse_array_list {
 	# read the parenthesis
 	$upto++;
 
-	print "reading array list\n";
+	#print "reading array list\n";
 
 	my @children = ();
 
@@ -919,7 +973,7 @@ sub parse_hash_list {
 	# read parenthesis
 	$upto++;
 
-	print "reading hash list\n";
+	#print "reading hash list\n";
 
 	my @children = ();
 	# children will be key-value pairs
@@ -956,7 +1010,7 @@ sub parse_call {
 	# get the name of the call
 	my %curr = %{$tokens[$upto]};
 	my $name = $curr{"value"};
-	print "parsing call $name\n";
+	#print "parsing call $name\n";
 	$upto++;
 
 	# parse arguments
@@ -997,8 +1051,6 @@ sub parse_args {
 
 		if ($upto < $#tokens) {
 			%next = %{$tokens[$upto+1]};
-		} else {
-			undef %next;
 		}
 
 		if ($curr{"type"} eq PARENTHESIS_CLOSE) {
@@ -1041,7 +1093,7 @@ sub parse_arg {
 sub parse_expr {
 	my %curr = %{$tokens[$upto]};
 
-	print "reading expr, starting with ", $curr{"type"}, "\n";
+	#print "reading expr, starting with ", $curr{"type"}, "\n";
 
 	my $left_ref;
 	
@@ -1156,25 +1208,27 @@ sub parse_var {
 		$node{"type"} = NODE_VARIABLE;
 
 		# are we indexing an array/hash?
-		my %next = %{$tokens[$upto]};
-		if ($next{"type"} eq SQUARE_OPEN) {
-			# array indexing
-			$upto++;
-			$node{"index"} = parse_expr();
+		if ($upto <= $#tokens) {
+			my %next = %{$tokens[$upto]};
+			if ($next{"type"} eq SQUARE_OPEN) {
+				# array indexing
+				$upto++;
+				$node{"index"} = parse_expr();
 
-			# consume closing bracket
-			%next = %{$tokens[$upto]};
-			($next{"type"} eq SQUARE_CLOSE) or die "Expecting closing square bracket";
-			$upto++;
-		} elsif ($next{"type"} eq CURLY_OPEN) {
-			# hash indexing
-			$upto++;
-			$node{"index"} = parse_expr();
+				# consume closing bracket
+				%next = %{$tokens[$upto]};
+				($next{"type"} eq SQUARE_CLOSE) or die "Expecting closing square bracket";
+				$upto++;
+			} elsif ($next{"type"} eq CURLY_OPEN) {
+				# hash indexing
+				$upto++;
+				$node{"index"} = parse_expr();
 
-			# consume closing bracket
-			%next = %{$tokens[$upto]};
-			($next{"type"} eq CURLY_CLOSE) or die "Expecting closing curly bracket";
-			$upto++;
+				# consume closing bracket
+				%next = %{$tokens[$upto]};
+				($next{"type"} eq CURLY_CLOSE) or die "Expecting closing curly bracket";
+				$upto++;
+			}
 		}
 		# otherwise it's a plain old scalar
 	} elsif ($curr{"type"} eq ARRAY) {
@@ -1232,7 +1286,7 @@ sub compile {
 	my %node = %{$_[0]};
 	my $type = $node{"type"};
 
-	print "compiling $type\n";
+	#print "compiling $type\n";
 
 	my $output = "";
 	my $indent = INDENT x $indent_level;
@@ -1396,6 +1450,19 @@ sub compile {
 					$output .= "\n";
 				}
 			}
+		} elsif ($name eq "printf") {
+			$format_string = compile($args[0]);
+
+			$output .= "sys.stdout.write(";
+			$output .= $format_string;
+			$output .= " % (";
+			for $i (1..$#args) {
+				$output .= compile($args[$i]);
+				if ($i < $#args) {
+					$output .= ", ";
+				}
+			}
+			$output .= "))";
 		} elsif ($name eq "last") {
 			$output .= "break";
 		} elsif ($name eq "next") {
@@ -1424,11 +1491,54 @@ sub compile {
 			my $pattern_ref = $args[0];
 			my $var_ref = $args[1];
 
-			# TODO: handle list of scalars
 			$output .= compile($pattern_ref);
 			$output .= ".join(";
-			$output .= $var_ref->{"name"};
+
+			if ($var_ref->{"type"} eq NODE_ARRAY) {
+				$output .= compile($var_ref);
+			} else {
+				$output .= "(";
+				for $i (1..$#args) {
+					$output .= compile($args[$i]);
+					if ($i < $#args) {
+						$output .= ", ";
+					}
+				}
+				$output .= ")";
+			}
+
 			$output .= ")";
+		} elsif ($name eq "push") {
+			my $array_ref = $args[0];
+			my $var_ref = $args[1];
+
+			$output .= compile($array_ref);
+			$output .= ".append(";
+			$output .= compile($var_ref);
+			$output .= ")";
+		} elsif ($name eq "pop") {
+			my $array_ref = $args[0];
+
+			$output .= compile($array_ref);
+			$output .= ".pop()"
+		} elsif ($name eq "unshift") {
+			my $array_ref = $args[0];
+			my $var_ref = $args[1];
+
+			$output .= compile($array_ref);
+			$output .= ".insert(0, ";
+			$output .= compile($var_ref);
+			$output .= ")";
+		} elsif ($name eq "shift") {
+			my $array_ref = $args[0];
+
+			$output .= compile($array_ref);
+			$output .= ".pop(0)";
+		} elsif ($name eq "reverse") {
+			my $array_ref = $args[0];
+
+			$output .= compile($array_ref);
+			$output .= "[::-1]";
 		} else {
 			# ordinary function call
 			$output .= $name;
@@ -1446,13 +1556,13 @@ sub compile {
 
 		# easy mode
 		my $value = $node{"value"};
-		$value =~ s/"/\\"/;
+		$value =~ s/"/\\"/g;
 		$output .= '"' . $value . '"';
 
 	} elsif ($type eq STRING_INTERPOLATED) {
 
 		my $value = $node{"value"};
-		$value =~ s/"\//"/;
+		$value =~ s/"/\\"/g;
 		@chars = split //, $value;
 
 		# let's do some shitty mini tokenisation/parsing! yay
@@ -1460,67 +1570,59 @@ sub compile {
 		my $tmp = ""; # holds the part of the ordinary string we've read so far
 		my $empty = 1; # holds whether we've output something yet
 		while ($i < @chars) {
-			$curr = $chars[$i];
-			$next = $chars[$i+1];
+			my $curr = $chars[$i];
+			my $next;
+			if ($i+1 <= $#chars) {
+				$next = $chars[$i+1];
+			}
 
 			if ($curr eq "\\") {
-				if ($next eq '$') {
+				if (defined $next && $next eq '$') {
 					$tmp .= '$';
 					$i += 2;
 					next;
 				} else {
 					$tmp .= $curr;
 				}
-			} elsif ($curr eq '$') {
+			} elsif (($curr eq '$') || ($curr eq '@')) {
 				# oh boy interpolation here we go
-				if (length($tmp) > 0) {
-					if (!$empty) {
-						$output .= "+";
-					} else {
-						$empty = 0;
-					}
-					$output .= '"' . $tmp . '"';
-					$tmp = "";
-				}
-
-				# my $var_name = "";
-
-				# $i++;
-				# $curr = $chars[$i];
-				# while ($i < length($value) && $curr =~ /[A-Za-z0-9_]/) {
-				# 	$var_name .= $curr;
-				# 	$i++;
-				# 	$curr = $chars[$i];
-				# }
-
-				my $expr = "";
-				$curr = $chars[$i];
-				while ($i < length($value) && $curr =~ /[A-Za-z0-9_\$\[\]{}]/) {
-					$expr .= $curr;
-					$i++;
-					$curr = $chars[$i];
-				}
-				
-				# tokenise expression using the global tokeniser
-				# so much hax...
-				@tokens = tokenise($expr);
-				# now parse it
-				$upto = 0;
-				$tree_ref = parse_expr();
-				print Dumper($tree_ref)."\n";
-				# and compile it
-				$output .= "str(" . compile($tree_ref) . ")";
-
-				# add the last char to tmp
-				if ($i < length($value)) {
-					$tmp .= $curr;
-				}
-
 				if (!$empty) {
-					$output .= "+";
+					$output .= " + ";
 				} else {
 					$empty = 0;
 				}
+
+				if (length($tmp) > 0) {
+					$output .= '"' . $tmp . '" + ';
+					$tmp = "";
+				}
+
+				$interpolating = 1;
+
+				# tokenise expression using the global tokeniser
+				# so much hax...
+				@tokens = tokenise(substr($value, $i, length($value)-$i));
+
+				if ($debug) {
+					print "tokens:".Dumper(@tokens)."\n";
+				}
+				# now parse it
+				# it'll stop once it considers the expression is done
+				$upto = 0;
+				$tree_ref = parse_var();
+
+				if ($debug) {
+					print Dumper($tree_ref)."\n";
+				}
+				# and compile it
+				
+				$str_output = compile($tree_ref);
+				$output .= "str(" . $str_output . ")";
+
+				$interpolating = 0;
+
+				# hax to the max
+				$i += $last_interpolation_index;
 			} else {
 				$tmp .= $curr;
 			}
@@ -1531,7 +1633,7 @@ sub compile {
 		# add tmp if there's something left
 		if (length($tmp) > 0) {
 			if (!$empty) {
-				$output .= "+";
+				$output .= " + ";
 			}
 			$output .= '"' . $tmp . '"';
 		}
@@ -1549,19 +1651,40 @@ sub compile {
 
 	} elsif ($type eq NODE_VARIABLE) {
 
-		if (defined $node{"index"}) {
-			$output .= $node{"name"};
-			$output .= "[";
-			$output .= compile($node{"index"});
-			$output .= "]";
+		# if the first char is #, it's actually last index of array
+		my $name = $node{"name"};
+
+		if (substr($name, 0, 1) eq "#") {
+			$name = substr($name, 1, length($name));
+			$output .= "len(";
+			$output .= $name;
+			$output .= ")-1";
 		} else {
-			$output .= $node{"name"};
+			if (defined $node{"index"}) {
+				$output .= $node{"name"};
+				$output .= "[";
+				$output .= compile($node{"index"});
+				$output .= "]";
+			} else {
+				$output .= $node{"name"};
+			}
 		}
 
 	} elsif ($type eq NODE_ARRAY) {
 
-		# if the array hasn't been handled specially by this point, just use the length of it
-		$output .= "len(" . $node{"name"} . ")";
+		if ($interpolating) {
+			$output .= '" ".join(map(str, ';
+			$output .= $node{"name"};
+			$output .= '))';
+		} else {
+			# use the name of the array if there aren't exceptional circumstances
+			$output .= $node{"name"};
+		}
+
+	} elsif ($type eq NODE_HASH) {
+
+		# default to the name of the hash
+		$output .= $node{"name"};
 
 	} elsif ($type eq NODE_ARRAY_LIST) {
 
@@ -1616,8 +1739,12 @@ sub compile {
 			$output .= ")";
 		} else {
 
-			my $optype = $node{"value"};
-			my $opstring = op_to_string($optype);
+			my $optype = $node{"value"}->{"type"};
+			my $opstring = op_to_string($node{"value"});
+
+			# tells us if it's a string comparator or not
+			# haxville, population: me
+			my $string_comparator = (defined $node{"value"}->{"value"});
 
 			if (@operands == 2) {
 
@@ -1632,20 +1759,24 @@ sub compile {
 					($optype eq LOGICAL_AND) ||
 					($optype eq LOGICAL_OR) ||
 					($optype eq LOGICAL_NOT) ||
+					($string_comparator && (
 					($optype eq GREATER_THAN) ||
 					($optype eq GREATER_EQUALS) ||
 					($optype eq LESS_THAN) ||
 					($optype eq LESS_EQUALS) ||
 					($optype eq DOUBLE_EQUALS) ||
 					($optype eq NOT_EQUALS) ||
-					($optype eq CONCAT)) {
+					($optype eq CONCAT)))) {
 					# not arithmetic
 				} else {
 					# arithmetic
-					if ($operands[0]->{"type"} ne NUMBER) {
+					my $type0 = $operands[0]->{"type"};
+					my $type1 = $operands[1]->{"type"};
+
+					if ($type0 ne NUMBER && $type0 ne NODE_EXPRESSION) {
 						$left = "__number(" . $left . ")";
 					}
-					if ($operands[1]->{"type"} ne NUMBER) {
+					if ($type1 ne NUMBER && $type1 ne NODE_EXPRESSION) {
 						$right = "__number(" . $right . ")";
 					}
 				}
@@ -1710,33 +1841,40 @@ foreach $file (@files) {
 		$data .= $_;
 	}
 
-	print "\n", "-" x 50, "\n";
+	if ($debug) {
+		print "\n", "-" x 50, "\n";
+	}
 
 	# initialise parser shiz
 	@tokens = tokenise($data);
 	$upto = 0;
-	print "TOKENISING\n\n";
-	print Dumper(\@tokens);
-	print "\n", "-" x 50, "\n";
 
-	#foreach $token (@tokens) {
-	#	print "token: $token ", %{$token}, "\n";
-	#}
+	if ($debug) {
+		print "TOKENISING\n\n";
+		print Dumper(\@tokens);
+		print "\n", "-" x 50, "\n";
+	}
 
 	$tree_ref = parse();
-	print "PARSING\n\n";
-	print Dumper($tree_ref);
-	print "\n", "-" x 50, "\n";
+
+	if ($debug) {
+		print "PARSING\n\n";
+		print Dumper($tree_ref);
+		print "\n", "-" x 50, "\n";
+	}
 
 	#next;
 
-	print "COMPILING\n\n";
+	if ($debug) {
+		print "COMPILING\n\n";
+	}
 
 	# top stuff
+	$output = "#!/usr/bin/python2.7 -u\n";
 	$output .= "import sys\n";
 	$output .= "from perl2python import ARGV, __input, __number\n\n";
 	$output .= compile($tree_ref) . "\n";
-	print "\n\n";
+	#print "\n\n";
 	print $output;
-
+	print "\n";
 }
