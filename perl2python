@@ -459,6 +459,9 @@ use constant AST_NODES => qw(
 	NODE_FOR_RANGE
 	NODE_FOR_CLASSICAL
 
+	NODE_ARRAY_LIST
+	NODE_HASH_LIST
+
 	NODE_SECTIONS
 );
 
@@ -769,7 +772,9 @@ sub parse_statement {
 	if ($type eq COMMENT) {
 		$node_ref = \%curr;
 		$upto++;
-	} elsif ($type eq SCALAR) {
+	} elsif (($type eq SCALAR) ||
+	         ($type eq ARRAY) ||
+	         ($type eq HASH)) {
 		# varmod, maybe...
 		if (($next{"type"} eq EQUALS) ||
 			($next{"type"} eq INCREMENT) ||
@@ -822,10 +827,21 @@ sub parse_varmod {
 	if ($type eq EQUALS) {
 		# plain old assignment
 		# unless we're talking about a hash or array, that is...
-		if ($var_type eq SCALAR) {
+		if ($var_type eq NODE_VARIABLE) {
 			$newvalue_ref = parse_expr();
-		} elsif ($var_type eq ARRAY) {
-			
+		} elsif ($var_type eq NODE_ARRAY) {
+			# if there's a parenthesis, parse an array list
+			if ($type2 eq PARENTHESIS_OPEN) {
+				$newvalue_ref = parse_array_list();
+			} else {
+				$newvalue_ref = parse_expr();
+			}
+		} elsif ($var_type eq NODE_HASH) {
+			if ($type2 eq PARENTHESIS_OPEN) {
+				$newvalue_ref = parse_hash_list();
+			} else {
+				$newvalue_ref = parse_expr();
+			}
 		}
 	} elsif (($type eq INCREMENT) ||
 		     ($type eq DECREMENT)) {
@@ -865,6 +881,72 @@ sub parse_varmod {
 		"type" => NODE_ASSIGNMENT,
 		"name" => $var_ref,
 		"value" => $newvalue_ref
+	);
+
+	return \%node;
+}
+
+sub parse_array_list {
+	# read the parenthesis
+	$upto++;
+
+	print "reading array list\n";
+
+	my @children = ();
+
+	# read up to the closing parenthesis
+	while ($tokens[$upto]->{"type"} ne PARENTHESIS_CLOSE) {
+		push @children, parse_expr();
+
+		# consume comma
+		if ($tokens[$upto]->{"type"} eq COMMA) {
+			$upto++;
+		}
+	}
+
+	# consume closing parenthesis
+	$upto++;
+
+	my %node = (
+		"type" => NODE_ARRAY_LIST,
+		"children" => \@children
+	);
+
+	return \%node;
+}
+
+sub parse_hash_list {
+	# read parenthesis
+	$upto++;
+
+	print "reading hash list\n";
+
+	my @children = ();
+	# children will be key-value pairs
+
+	while ($tokens[$upto]->{"type"} ne PARENTHESIS_CLOSE) {
+		my $key_ref = parse_expr();
+		
+		# consume =>
+		($tokens[$upto]->{"type"} eq POINT) or die "Expecting =>";
+		$upto++;
+
+		my $value_ref = parse_expr();
+
+		# consume comma
+		if ($tokens[$upto]->{"type"} eq COMMA) {
+			$upto++;
+		}
+
+		push @children, [$key_ref, $value_ref];
+	}
+
+	# consume closing parenthesis
+	$upto++;
+
+	my %node = (
+		"type" => NODE_HASH_LIST,
+		"children" => \@children
 	);
 
 	return \%node;
@@ -1018,46 +1100,48 @@ sub parse_expr {
 	}
 
 	# check for an operator
-	my %op = %{$tokens[$upto]};
-	my $type = $op{"type"};
+	if (defined $tokens[$upto]) {
+		my %op = %{$tokens[$upto]};
+		my $type = $op{"type"};
 
-	# check for binary operators
-	if (($type eq PLUS) ||
-		($type eq MINUS) ||
-		($type eq MUL) ||
-		($type eq DIV) ||
-		($type eq MOD) ||
-		($type eq POW) ||
-		($type eq BIT_OR) ||
-		($type eq BIT_AND) ||
-		($type eq XOR) ||
-		($type eq LOGICAL_AND) ||
-		($type eq LOGICAL_OR) ||
-		($type eq CONCAT) ||
-		($type eq DOUBLE_EQUALS) ||
-		($type eq NOT_EQUALS) ||
-		($type eq GREATER_THAN) ||
-		($type eq GREATER_EQUALS) ||
-		($type eq LESS_THAN) ||
-		($type eq LESS_EQUALS)) {
+		# check for binary operators
+		if (($type eq PLUS) ||
+			($type eq MINUS) ||
+			($type eq MUL) ||
+			($type eq DIV) ||
+			($type eq MOD) ||
+			($type eq POW) ||
+			($type eq BIT_OR) ||
+			($type eq BIT_AND) ||
+			($type eq XOR) ||
+			($type eq LOGICAL_AND) ||
+			($type eq LOGICAL_OR) ||
+			($type eq CONCAT) ||
+			($type eq DOUBLE_EQUALS) ||
+			($type eq NOT_EQUALS) ||
+			($type eq GREATER_THAN) ||
+			($type eq GREATER_EQUALS) ||
+			($type eq LESS_THAN) ||
+			($type eq LESS_EQUALS)) {
 
-		# consume operator
-		$upto++;
+			# consume operator
+			$upto++;
 
-		my $right_ref = parse_expr();
+			my $right_ref = parse_expr();
 
-		my %node = (
-			"type" => NODE_EXPRESSION,
-			"value" => \%op,
-			"children" => [$left_ref, $right_ref]
-		);
+			my %node = (
+				"type" => NODE_EXPRESSION,
+				"value" => \%op,
+				"children" => [$left_ref, $right_ref]
+			);
 
-		return \%node;
+			return \%node;
 
-	} else {
-		# just return the left of the expression, nothing else to see here
-		return $left_ref;
+		}
 	}
+
+	# just return the left of the expression, nothing else to see here
+	return $left_ref;
 }
 
 sub parse_var {
@@ -1399,15 +1483,33 @@ sub compile {
 					$tmp = "";
 				}
 
-				my $var_name = "";
+				# my $var_name = "";
 
-				$i++;
+				# $i++;
+				# $curr = $chars[$i];
+				# while ($i < length($value) && $curr =~ /[A-Za-z0-9_]/) {
+				# 	$var_name .= $curr;
+				# 	$i++;
+				# 	$curr = $chars[$i];
+				# }
+
+				my $expr = "";
 				$curr = $chars[$i];
-				while ($i < length($value) && $curr =~ /[A-Za-z0-9_]/) {
-					$var_name .= $curr;
+				while ($i < length($value) && $curr =~ /[A-Za-z0-9_\$\[\]{}]/) {
+					$expr .= $curr;
 					$i++;
 					$curr = $chars[$i];
 				}
+				
+				# tokenise expression using the global tokeniser
+				# so much hax...
+				@tokens = tokenise($expr);
+				# now parse it
+				$upto = 0;
+				$tree_ref = parse_expr();
+				print Dumper($tree_ref)."\n";
+				# and compile it
+				$output .= "str(" . compile($tree_ref) . ")";
 
 				# add the last char to tmp
 				if ($i < length($value)) {
@@ -1419,7 +1521,6 @@ sub compile {
 				} else {
 					$empty = 0;
 				}
-				$output .= "str(" . $var_name . ")";
 			} else {
 				$tmp .= $curr;
 			}
@@ -1462,12 +1563,40 @@ sub compile {
 		# if the array hasn't been handled specially by this point, just use the length of it
 		$output .= "len(" . $node{"name"} . ")";
 
+	} elsif ($type eq NODE_ARRAY_LIST) {
+
+		my @items = @{$node{"children"}};
+
+		$output .= "[";
+		for $i (0..$#items) {
+			$output .= compile($items[$i]);
+			if ($i < $#items) {
+				$output .= ", ";
+			}
+		}
+		$output .= "]";
+
+	} elsif ($type eq NODE_HASH_LIST) {
+
+		my @items = @{$node{"children"}};
+
+		$output .= "{";
+		for $i (0..$#items) {
+			$output .= compile($items[$i]->[0]); # key
+			$output .= ": ";
+			$output .= compile($items[$i]->[1]); # value
+			if ($i < $#items) {
+				$output .= ", ";
+			}
+		}
+		$output .= "}";
+
 	} elsif ($type eq NODE_ASSIGNMENT) {
 
 		my $left_ref = $node{"name"};
 		my $right_ref = $node{"value"};
 
-		$output .= compile($left_ref);
+		$output .= $left_ref->{"name"};
 		$output .= " = ";
 		$output .= compile($right_ref);
 		#$output .= "\n";
@@ -1487,14 +1616,43 @@ sub compile {
 			$output .= ")";
 		} else {
 
-			my $opstring = op_to_string($node{"value"});
+			my $optype = $node{"value"};
+			my $opstring = op_to_string($optype);
 
 			if (@operands == 2) {
 
 				# binary operator
-				$output .= compile($operands[0]);
+				# is it arithmetic?
+				# or rather, is it not logic or concatenation
+
+				my $left = compile($operands[0]);
+				my $right = compile($operands[1]);
+
+				if (($optype eq CONCAT) ||
+					($optype eq LOGICAL_AND) ||
+					($optype eq LOGICAL_OR) ||
+					($optype eq LOGICAL_NOT) ||
+					($optype eq GREATER_THAN) ||
+					($optype eq GREATER_EQUALS) ||
+					($optype eq LESS_THAN) ||
+					($optype eq LESS_EQUALS) ||
+					($optype eq DOUBLE_EQUALS) ||
+					($optype eq NOT_EQUALS) ||
+					($optype eq CONCAT)) {
+					# not arithmetic
+				} else {
+					# arithmetic
+					if ($operands[0]->{"type"} ne NUMBER) {
+						$left = "__number(" . $left . ")";
+					}
+					if ($operands[1]->{"type"} ne NUMBER) {
+						$right = "__number(" . $right . ")";
+					}
+				}
+
+				$output .= $left;
 				$output .= " $opstring ";
-				$output .= compile($operands[1]);
+				$output .= $right;
 
 			} elsif (@operands == 1) {
 				# unary operator
@@ -1576,7 +1734,7 @@ foreach $file (@files) {
 
 	# top stuff
 	$output .= "import sys\n";
-	$output .= "from perl2python import ARGV, __input\n\n";
+	$output .= "from perl2python import ARGV, __input, __number\n\n";
 	$output .= compile($tree_ref) . "\n";
 	print "\n\n";
 	print $output;
