@@ -327,7 +327,7 @@ sub tokenise {
 				$state = STATE_WORD;
 				next;
 				#$value .= $curr;
-			} elsif ($curr =~ /[0-9.]/) {
+			} elsif ($curr =~ /[0-9]/ || ($curr eq "." && $next ne ".")) {
 				# start reading number
 				$state = STATE_NUMBER;
 				next;
@@ -450,7 +450,12 @@ sub tokenise {
 				} elsif ($value eq "le") {
 					push @tokens, makeToken(LESS_EQUALS, STRING);
 				} else {
-					push @tokens, makeToken(WORD, $value);
+					# if we're interpolating, make it a string
+					if ($interpolating) {
+						push @tokens, makeToken(STRING, $value);
+					} else {
+						push @tokens, makeToken(WORD, $value);
+					}
 				}
 
 				$state = STATE_IDLE;
@@ -460,7 +465,7 @@ sub tokenise {
 			# consume char
 			$value .= $curr;
 
-			if (!($next =~ /[0-9.]/)) {
+			if (!($next =~ /[0-9]/ || ($next eq "." && $next2 ne "."))) {
 				# end of number
 				push @tokens, makeToken(NUMBER, $value);
 
@@ -813,6 +818,7 @@ sub parse_statement {
 	}
 
 	my $type = $curr{"type"};
+	#print "wat ".Dumper(\%curr)."\n";
 
 	my $node_ref;
 
@@ -828,6 +834,7 @@ sub parse_statement {
 			($next{"type"} eq INCREMENT) ||
 			($next{"type"} eq DECREMENT) ||
 			(defined $next2{"type"} && $next2{"type"} eq REASSIGN))) {
+			#print "varmod\n";
 			$node_ref = parse_varmod();
 		} else {
 			$node_ref = parse_expr();
@@ -846,6 +853,8 @@ sub parse_statement {
 		# apparently semicolons aren't needed for the last statement in a block
 		# wtf are you smoking, larry wall
 		if ($curr{"type"} ne CURLY_CLOSE) {
+			#print "$upto $#tokens\n";
+			#print Dumper(\%curr)."\n";
 			($curr{"type"} eq SEMICOLON) or die "Expecting semicolon/closing brace";
 			$upto++;
 		}
@@ -931,11 +940,13 @@ sub parse_varmod {
 
 	#@children = ($var_ref, $newvalue_ref);
 
+	#print "i made a varmod\n";
 	my %node = (
 		"type" => NODE_ASSIGNMENT,
 		"name" => $var_ref,
 		"value" => $newvalue_ref
 	);
+	#print Dumper(\%node)."\n";
 
 	return \%node;
 }
@@ -1165,6 +1176,8 @@ sub parse_expr {
 			($type eq POW) ||
 			($type eq BIT_OR) ||
 			($type eq BIT_AND) ||
+			($type eq SHIFT_LEFT) ||
+			($type eq SHIFT_RIGHT) ||
 			($type eq XOR) ||
 			($type eq LOGICAL_AND) ||
 			($type eq LOGICAL_OR) ||
@@ -1214,6 +1227,7 @@ sub parse_var {
 				# array indexing
 				$upto++;
 				$node{"index"} = parse_expr();
+				$node{"index_type"} = ARRAY;
 
 				# consume closing bracket
 				%next = %{$tokens[$upto]};
@@ -1223,6 +1237,7 @@ sub parse_var {
 				# hash indexing
 				$upto++;
 				$node{"index"} = parse_expr();
+				$node{"index_type"} = HASH;
 
 				# consume closing bracket
 				%next = %{$tokens[$upto]};
@@ -1264,6 +1279,8 @@ sub op_to_string {
 		case BIT_AND		{ return "&" }
 		case BIT_OR			{ return "|" }
 		case BIT_NOT		{ return "~" }
+		case SHIFT_LEFT		{ return "<<" }
+		case SHIFT_RIGHT	{ return ">>" }
 		case XOR			{ return "^" }
 		case LOGICAL_AND	{ return "and" }
 		case LOGICAL_OR		{ return "or" }
@@ -1397,7 +1414,7 @@ sub compile {
 		$output .= compile($node{"children"}[0]);
 
 		# is it an assignment?
-		if ($statement_ref->{"type"} eq NODE_ASSIGNMENT) {
+		if (ref($statement_ref) eq "HASH" && $statement_ref->{"type"} eq NODE_ASSIGNMENT) {
 			# run the assignment at the end of the loop
 			$output .= "\n";
 			$output .= $indent . INDENT . compile($statement_ref);
@@ -1663,7 +1680,20 @@ sub compile {
 			if (defined $node{"index"}) {
 				$output .= $node{"name"};
 				$output .= "[";
-				$output .= compile($node{"index"});
+
+				# if this is an array, convert index to number
+
+				if ($node{"index_type"} eq ARRAY) {
+					my $type = $node{"index"}->{"type"};
+					if ($type ne NUMBER && $type ne NODE_EXPRESSION) {
+						$output .= "int(__number(" . compile($node{"index"}) . "))";
+					} else {
+						$output .= compile($node{"index"});
+					}
+				} else {
+					$output .= compile($node{"index"});
+				}
+
 				$output .= "]";
 			} else {
 				$output .= $node{"name"};

@@ -12,7 +12,7 @@ here is the grammar for the lexer, which should hopefully be fairly basic and en
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-here's the grammar for the parser
+here's the (very rough) grammar for the parser
 let's just pretend that + and - are the only binary operators,
 and that ! is the only unary operator
 because this assignment is not about developing a formal definition of perl from scratch...
@@ -20,7 +20,7 @@ because this assignment is not about developing a formal definition of perl from
 <program> ::= <sectionlist>
 
 <section> ::= <statementlist> | <conditional> | <loop>
-<sectionlist> ::= <section> <section>
+<sectionlist> ::= <section> <sectionlist>
 
 <conditional> ::= "if" <expr> <block>
 <loop> ::= <whileloop> | <forloop> | <foreachloop> | <forrangeloop>
