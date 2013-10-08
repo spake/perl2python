@@ -2177,15 +2177,17 @@ foreach $file (@files) {
 	$output .= "\n";
 
 	# initialise variables
-	$output .= join ", ", sort @variables;
-	$output .= " = ";
-	for ($i = 0; $i <= $#variables; $i++) {
-		$output .= '""';
-		if ($i < $#variables) {
-			$output .= ", ";
+	if (@variables > 0) {
+		$output .= join ", ", sort @variables;
+		$output .= " = ";
+		for ($i = 0; $i <= $#variables; $i++) {
+			$output .= '""';
+			if ($i < $#variables) {
+				$output .= ", ";
+			}
 		}
+		$output .= "\n";
 	}
-	$output .= "\n";
 
 	# actual code
 	$output .= compile($tree_ref) . "\n";
