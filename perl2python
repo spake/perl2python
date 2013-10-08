@@ -8,12 +8,16 @@ use Switch;
 # a COMP2041 assignment
 
 $debug = 0; # dumps the results of tokenisation and parsing
+if ($#ARGV >= 0 && $ARGV[0] eq "-d") {
+	$debug = 1;
+}
 
 # --== LEXER ==--
 
 # token types
 use constant TOKENS => qw(
 	COMMENT
+	NEWLINE
 	WORD
 	SCALAR ARRAY HASH
 	STRING STRING_INTERPOLATED
@@ -38,10 +42,12 @@ use constant TOKENS => qw(
 	REASSIGN
 	RANGE
 	HANDLE_INPUT
+	HANDLE_INPUT_MULTILINE
 );
 # 'reassign' is a special token that can succeed operations
 # just a hacky way of dealing with +=, -=, *=, &=, etc.
 # 'HANDLE_INPUT' is something of the form <F>, <STDIN>, <>, etc.
+# the multiline variant is for assignment of a file handle to an array and is only used by the compiler
 
 # single char token mappings
 # this will hopefully clean up the lexer code a bit
@@ -56,7 +62,6 @@ use constant TOKENS => qw(
 	"{" => CURLY_OPEN,
 	"}" => CURLY_CLOSE,
 	"," => COMMA,
-	"/" => DIV
 );
 
 # tokeniser states
@@ -168,57 +173,58 @@ sub tokenise {
 			} elsif ($curr eq "=") {
 				# is it double equals?
 				if ($next eq "=") {
-					$token = makeToken(DOUBLE_EQUALS);
+					push @tokens, makeToken(DOUBLE_EQUALS);
 					$i++;
 				} elsif ($next eq ">") {
-					$token = makeToken(POINT);
+					push @tokens, makeToken(POINT);
 					$i++;
 				} elsif ($next eq "~") {
-					$token = makeToken(MATCH);
+					push @tokens, makeToken(MATCH);
 					$i++;
 				} else {
-					$token = makeToken(EQUALS);
+					push @tokens, makeToken(EQUALS);
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq ">") {
 				if ($next eq "=") {
-					$token = makeToken(GREATER_EQUALS);
+					push @tokens, makeToken(GREATER_EQUALS);
 					$i++;
 				} elsif ($next eq ">") {
-					$token = makeToken(SHIFT_RIGHT);
+					push @tokens, makeToken(SHIFT_RIGHT);
 					$i++;
+					if ($next2 eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
 				} else {
-					$token = makeToken(GREATER_THAN);
+					push @tokens, makeToken(GREATER_THAN);
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq "<") {
 				if ($next eq "=") {
-					$token = makeToken(LESS_EQUALS);
+					push @tokens, makeToken(LESS_EQUALS);
 					$i++;
 				} elsif ($next eq "<") {
-					$token = makeToken(SHIFT_LEFT);
+					# PUSH THIS NOW
+					push @tokens, makeToken(SHIFT_LEFT);
 					$i++;
+					if ($next2 eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
 				} elsif ($next =~ /[A-Za-z0-9_>]/) {
 					# begin reading handle input
 					$state = STATE_HANDLE_INPUT;
 					$i++;
 					next;
 				} else {
-					$token = makeToken(LESS_THAN);
+					push @tokens, makeToken(LESS_THAN);
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq "!") {
 				if ($next eq "=") {
-					$token = makeToken(NOT_EQUALS);
+					push @tokens, makeToken(NOT_EQUALS);
 					$i++;
 				} else {
-					$token = makeToken(LOGICAL_NOT);
+					push @tokens, makeToken(LOGICAL_NOT);
 				}
-
-				push @tokens, $token;
 			} elsif ($curr eq "&") {
 				if ($next eq "&") {
 					push @tokens, makeToken(LOGICAL_AND);
@@ -257,6 +263,12 @@ sub tokenise {
 						push @tokens, makeToken(REASSIGN);
 						$i++;
 					}
+				}
+			} elsif ($curr eq "/") {
+				push @tokens, makeToken(DIV);
+				if ($next eq "=") {
+					push @tokens, makeToken(REASSIGN);
+					$i++;
 				}
 			} elsif ($curr eq "+") {
 				# is it increment?
@@ -332,6 +344,8 @@ sub tokenise {
 				$state = STATE_NUMBER;
 				next;
 				#$value .= $curr;
+			} elsif ($curr eq "\n" && $next eq "\n") {
+				push @tokens, makeToken(NEWLINE);
 			}
 		} elsif ($state eq STATE_COMMENT) {
 			if ($curr eq "\n") {
@@ -396,10 +410,15 @@ sub tokenise {
 		} elsif ($state eq STATE_SCALAR || $state eq STATE_ARRAY || $state eq STATE_HASH) {
 			# special case: if we're supposedly reading a hash, and something that doesn't look
 			# like a variable name succeeds the %, read it as modulo instead
-			if ($state eq STATE_HASH && length($value) == 0 && $curr =~ /[^A-Za-z0-9_]/) {
+			if ($state eq STATE_HASH && length($value) == 0 && $curr =~ /[^A-Za-z]/) {
 				push @tokens, makeToken(MOD);
+				if ($curr eq "=") {
+					push @tokens, makeToken(REASSIGN);
+					$i++;
+				}
 
 				$state = STATE_IDLE;
+				next; # skip moving to the next character
 			} else {
 
 				# consume char
@@ -626,36 +645,58 @@ sub parse_for {
 		$upto++;
 		($curr{"type"} eq PARENTHESIS_OPEN) or die "Expected opening parenthesis";
 
-		# if it's an array, it's type 3
+		# if it's an array, it's type 2
 		# otherwise type 1
 		%curr = %{$tokens[$upto]};
 
-		if ($curr{"type"} eq ARRAY) {
-			# consume array token
-			$upto++;
+		# if ($curr{"type"} eq ARRAY) {
+		# 	# consume array token
+		# 	$upto++;
 
-			my %arr = %curr;
-			$node{"type"} = NODE_FOREACH;
-			$node{"value"} = \%arr;
-		} else {
-			# parse expressions
-			my $left_ref = parse_expr();
+		# 	my %arr = %curr;
+		# 	$node{"type"} = NODE_FOREACH;
+		# 	$node{"value"} = \%arr;
+		# } else {
+		# 	# parse expressions
+		# 	my $left_ref = parse_expr();
 
-			# consume range token (..)
+		# 	# consume range token (..)
+		# 	%curr = %{$tokens[$upto]};
+		# 	$upto++;
+		# 	($curr{"type"} eq RANGE) or die "Expecting range symbol (..)";
+
+		# 	my $right_ref = parse_expr();
+
+		# 	$node{"type"} = NODE_FOR_RANGE;
+		# 	$node{"value"} = [$left_ref, $right_ref];
+		# }
+
+		# parse an expression
+		my $left_ref = parse_expr();
+
+		# is there a range token?
+		%curr = %{$tokens[$upto]};
+		$upto++;
+
+		if ($curr{"type"} eq RANGE) {
+			# it's a range, yay
+			my $right_ref = parse_expr();
+
+			# consume the closing parenthesis
 			%curr = %{$tokens[$upto]};
 			$upto++;
-			($curr{"type"} eq RANGE) or die "Expecting range symbol (..)";
-
-			my $right_ref = parse_expr();
+			($curr{"type"} eq PARENTHESIS_CLOSE) or die "Expected closing parenthesis";
 
 			$node{"type"} = NODE_FOR_RANGE;
 			$node{"value"} = [$left_ref, $right_ref];
+		} else {
+			# should be closing parenthesis then.
+			($curr{"type"} eq PARENTHESIS_CLOSE) or die "Expected closing parenthesis";
+
+			$node{"type"} = NODE_FOREACH;
+			$node{"value"} = $left_ref;
 		}
 
-		# consume the closing one too
-		%curr = %{$tokens[$upto]};
-		$upto++;
-		($curr{"type"} eq PARENTHESIS_CLOSE) or die "Expected closing parenthesis";
 	} elsif ($curr{"type"} eq PARENTHESIS_OPEN) {
 
 		# classical for loop
@@ -822,19 +863,49 @@ sub parse_statement {
 
 	my $node_ref;
 
-	if ($type eq COMMENT) {
+	if ($type eq COMMENT || $type eq NEWLINE) {
 		$node_ref = \%curr;
 		$upto++;
 	} elsif (($type eq SCALAR) ||
 	         ($type eq ARRAY) ||
 	         ($type eq HASH)) {
 		# varmod, maybe...
+		# if (defined $next{"type"} &&
+		# 	(($next{"type"} eq EQUALS) ||
+		# 	($next{"type"} eq INCREMENT) ||
+		# 	($next{"type"} eq DECREMENT) ||
+		# 	(defined $next2{"type"} && $next2{"type"} eq REASSIGN))) {
+		# 	#print "varmod\n";
+		# 	$node_ref = parse_varmod();
+		# } else {
+		# 	$node_ref = parse_expr();
+		# }
+
+		# read the variable in (backup $upto first, however)
+		# this is necessary to read in all the tokens constituting an index
+		my $upto_backup = $upto;
+		my $var_ref = parse_var();
+		#print "VAR".Dumper($var_ref)."\n";
+
+		my %next;
+		my %next2;
+		if ($upto+1 <= $#tokens) {
+			%next = %{$tokens[$upto]};
+		}
+		if ($upto+2 <= $#tokens) {
+			%next2 = %{$tokens[$upto+1]};
+		}
+
+		# restore the original $upto now
+		$upto = $upto_backup;
+
+		# check for varmod
 		if (defined $next{"type"} &&
 			(($next{"type"} eq EQUALS) ||
 			($next{"type"} eq INCREMENT) ||
 			($next{"type"} eq DECREMENT) ||
 			(defined $next2{"type"} && $next2{"type"} eq REASSIGN))) {
-			#print "varmod\n";
+
 			$node_ref = parse_varmod();
 		} else {
 			$node_ref = parse_expr();
@@ -847,7 +918,7 @@ sub parse_statement {
 
 	# consume semicolon
 	# om nom nom
-	if ($upto <= $#tokens && !($type eq COMMENT || $ignore_semicolon)) {
+	if ($upto <= $#tokens && !(($type eq COMMENT || $type eq NEWLINE) || $ignore_semicolon)) {
 		%curr = %{$tokens[$upto]};
 
 		# apparently semicolons aren't needed for the last statement in a block
@@ -1024,8 +1095,20 @@ sub parse_call {
 	#print "parsing call $name\n";
 	$upto++;
 
-	# parse arguments
-	my $args_ref = parse_args();
+	my $args_ref;
+
+	# is there an if or something stupid like that?
+	%curr = %{$tokens[$upto]};
+	if ($curr{"type"} eq WORD && $curr{"value"} eq "if") {
+		# parse it as an if statement
+		# it's probably some weird "last if" type of thing
+		$upto++; # consume if
+
+		$args_ref = [parse_expr()];
+	} else {
+		# parse arguments
+		$args_ref = parse_args();
+	}
 
 	# assemble a node
 	my %node = (
@@ -1082,6 +1165,7 @@ sub parse_args {
 			# must be an argument
 			# if it's not the first arg, we need to consume the comma too
 			if (!$first) {
+				#print Dumper(\%curr);
 				($curr{"type"} eq COMMA) or die "Expecting comma";
 				$upto++;
 			}
@@ -1119,7 +1203,10 @@ sub parse_expr {
 		$left_ref = parse_var();
 
 	} elsif (($curr{"type"} eq LOGICAL_NOT) ||
-		     ($curr{"type"} eq BIT_NOT)) { # is it a unary operator?
+		     ($curr{"type"} eq BIT_NOT) ||
+		     ($curr{"type"} eq MINUS)) { # is it a unary operator?
+		# ^ yeah, about that... minus can also be a unary operator.
+		# negative numbers and such.
 
 		# consuuuuuume the operator
 		$upto++;
@@ -1390,7 +1477,8 @@ sub compile {
 			$output .= "$block_type ";
 			$output .= compile($var_ref);
 			$output .= " in ";
-			$output .= $array_ref->{"value"};
+			#$output .= $array_ref->{"value"};
+			$output .= compile($array_ref);
 		} else {
 			# is this an assignment?
 			if ($statement_ref->{"type"} eq NODE_ASSIGNMENT) {
@@ -1459,7 +1547,7 @@ sub compile {
 				if ($i > 0) { # first line will already have the indent
 					$output .= $indent;
 				}
-				$output .= "sys.stdout.write(str(";
+				$output .= "sys.stdout.write(_p2p_.string(";
 				$output .= compile($args[$i]);
 				$output .= ")";
 				$output .= ")";
@@ -1480,19 +1568,28 @@ sub compile {
 				}
 			}
 			$output .= "))";
-		} elsif ($name eq "last") {
-			$output .= "break";
-		} elsif ($name eq "next") {
-			$output .= "continue";
+		} elsif ($name eq "last" || $name eq "next") {
+			if ($name eq "last") {
+				$name = "break";
+			} elsif ($name eq "next") {
+				$name = "continue";
+			}
+			# is there an if statement child?
+			if (@args > 0) {
+				$output .= "if ";
+				$output .= compile($args[0]);
+				$output .= ": ";
+			}
+			$output .= $name;
 		} elsif ($name eq "chomp") {
-			# chomp -> rstrip
+			# use a function in our custom module
 			my $var_ref = $args[0];
 
 			# TODO: handle chomping arrays
 			$output .= compile($var_ref);
-			$output .= " = ";
+			$output .= " = _p2p_.chomp(";
 			$output .= compile($var_ref);
-			$output .= ".rstrip('\\n')";
+			$output .= ")";
 		} elsif ($name eq "split") {
 			# split -> split
 			# fancy that...
@@ -1556,6 +1653,21 @@ sub compile {
 
 			$output .= compile($array_ref);
 			$output .= "[::-1]";
+		} elsif ($name eq "keys") {
+			my $hash_ref = $args[0];
+
+			$output .= compile($hash_ref);
+			$output .= ".keys()";
+		} elsif ($name eq "values") {
+			my $hash_ref = $args[0];
+
+			$output .= compile($hash_ref);
+			$output .= ".values()";
+		} elsif ($name eq "sort") {
+			# todo: handle fancy comparison stuff (unlikely though)
+			$output .= "sorted(";
+			$output .= compile($args[0]);
+			$output .= ")";
 		} else {
 			# ordinary function call
 			$output .= $name;
@@ -1634,7 +1746,7 @@ sub compile {
 				# and compile it
 				
 				$str_output = compile($tree_ref);
-				$output .= "str(" . $str_output . ")";
+				$output .= "_p2p_.string(" . $str_output . ")";
 
 				$interpolating = 0;
 
@@ -1666,6 +1778,10 @@ sub compile {
 		$output .= $node{"value"};
 		#$output .= "\n";
 
+	} elsif ($type eq NEWLINE) {
+
+		# do nothing... the newline will be inserted automagically by compiling sections
+
 	} elsif ($type eq NODE_VARIABLE) {
 
 		# if the first char is #, it's actually last index of array
@@ -1686,7 +1802,7 @@ sub compile {
 				if ($node{"index_type"} eq ARRAY) {
 					my $type = $node{"index"}->{"type"};
 					if ($type ne NUMBER && $type ne NODE_EXPRESSION) {
-						$output .= "int(__number(" . compile($node{"index"}) . "))";
+						$output .= "int(_p2p_.num(" . compile($node{"index"}) . "))";
 					} else {
 						$output .= compile($node{"index"});
 					}
@@ -1749,10 +1865,24 @@ sub compile {
 		my $left_ref = $node{"name"};
 		my $right_ref = $node{"value"};
 
-		$output .= $left_ref->{"name"};
+		# what if we're trying to assign to the index of a hash that doesn't exist yet?
+		# that would be a damn shame
+		if ($left_ref->{"type"} eq NODE_VARIABLE && $left_ref->{"index_type"} eq HASH) {
+			my $name = $left_ref->{"name"};
+			$output .= "if \"$name\" not in vars(): $name = defaultdict(str)\n";
+			$output .= $indent;
+		}
+
+		$output .= compile($left_ref);
 		$output .= " = ";
+
+		# special case: assignment to an array of a file handle
+		if ($left_ref->{"type"} eq NODE_ARRAY && $right_ref->{"type"} eq HANDLE_INPUT) {
+			# change the ref type to HANDLE_INPUT_MULTILINE
+			# yay context!
+			$right_ref->{"type"} = HANDLE_INPUT_MULTILINE;
+		}
 		$output .= compile($right_ref);
-		#$output .= "\n";
 
 	} elsif ($type eq NODE_EXPRESSION) {
 
@@ -1804,10 +1934,10 @@ sub compile {
 					my $type1 = $operands[1]->{"type"};
 
 					if ($type0 ne NUMBER && $type0 ne NODE_EXPRESSION) {
-						$left = "__number(" . $left . ")";
+						$left = "_p2p_.num(" . $left . ")";
 					}
 					if ($type1 ne NUMBER && $type1 ne NODE_EXPRESSION) {
-						$right = "__number(" . $right . ")";
+						$right = "_p2p_.num(" . $right . ")";
 					}
 				}
 
@@ -1817,7 +1947,7 @@ sub compile {
 
 			} elsif (@operands == 1) {
 				# unary operator
-				$output .= "$opstring ";
+				$output .= "$opstring";
 				$output .= compile($operands[0]);
 			} else {
 				die "Unexpected number of operands";
@@ -1825,14 +1955,14 @@ sub compile {
 
 		}
 
-	} elsif ($type eq HANDLE_INPUT) {
+	} elsif ($type eq HANDLE_INPUT || $type eq HANDLE_INPUT_MULTILINE) {
 
 		my $handle = $node{"value"};
 		my $name;
 
 		# first special case: empty
 		if ($handle eq "") {
-			$output .= "__input()";
+			$output .= "_p2p_.input()";
 		} else {
 			# special case: STDIN
 			if ($handle eq "STDIN") {
@@ -1841,7 +1971,15 @@ sub compile {
 				$name = $handle;
 			}
 
-			$output .= "$name.readline()";
+			$output .= "$name.";
+
+			if ($type eq HANDLE_INPUT) {
+				$output .= "readline";
+			} elsif ($type eq HANDLE_INPUT_MULTILINE) {
+				$output .= "readlines";
+			}
+
+			$output .= "()";
 		}
 
 	} else {
@@ -1902,7 +2040,10 @@ foreach $file (@files) {
 	# top stuff
 	$output = "#!/usr/bin/python2.7 -u\n";
 	$output .= "import sys\n";
-	$output .= "from perl2python import ARGV, __input, __number\n\n";
+	$output .= "from collections import defaultdict\n";
+	$output .= "import perl2python as _p2p_\n";
+	$output .= "ARGV = sys.argv[1:]\n";
+	$output .= "\n";
 	$output .= compile($tree_ref) . "\n";
 	#print "\n\n";
 	print $output;
