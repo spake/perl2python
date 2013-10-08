@@ -591,6 +591,7 @@ use constant AST_NODES => qw(
 # the parser operates on a few global variables
 # the token array and the current token counter
 @tokens = ();
+@variables = (); # so we can initialise them!
 $upto = 0;
 
 sub parse {
@@ -1331,7 +1332,7 @@ sub parse_expr {
 
 				%curr = %{$tokens[$upto]};
 				if ($curr{"type"} eq WORD) {
-					push @flags, $curr{"value"};
+					@flags = split //, $curr{"value"};
 					$upto++;
 				}
 
@@ -1390,6 +1391,13 @@ sub parse_var {
 			}
 		}
 		# otherwise it's a plain old scalar
+
+		# if we're not interpolating, add it to the list of variables to be initialised
+		my $name = $curr{"value"};
+		if (!$interpolating && !grep /^$name$/, @variables) {
+			push @variables, $name;
+		}
+
 	} elsif ($curr{"type"} eq ARRAY) {
 		$node{"type"} = NODE_ARRAY;
 	} elsif ($curr{"type"} eq HASH) {
@@ -1870,6 +1878,9 @@ sub compile {
 			$output .= compile($node{"value"}); # var again
 			$output .= ", ";
 			$output .= $count;
+			if (grep /^i$/, @flags) {
+				$output .= ", re.I";
+			}
 			$output .= ")";
 		}
 
@@ -1983,12 +1994,13 @@ sub compile {
 
 		# what if we're trying to assign to the index of a hash that doesn't exist yet?
 		# that would be a damn shame
-		if ($left_ref->{"type"} eq NODE_VARIABLE && $left_ref->{"index_type"} eq HASH) {
+		if ($left_ref->{"type"} eq NODE_VARIABLE &&
+			exists $left_ref->{"index_type"} &&
+			$left_ref->{"index_type"} eq HASH) {
 			my $name = $left_ref->{"name"};
 			$output .= "if \"$name\" not in vars(): $name = defaultdict(str)\n";
 			$output .= $indent;
 		}
-
 		$output .= compile($left_ref);
 		$output .= " = ";
 
@@ -2078,7 +2090,7 @@ sub compile {
 
 		# first special case: empty
 		if ($handle eq "") {
-			$output .= "_p2p_.input()";
+			$output .= "_input_.readline()";
 		} else {
 			# special case: STDIN
 			if ($handle eq "STDIN") {
@@ -2155,14 +2167,29 @@ foreach $file (@files) {
 
 	# top stuff
 	$output = "#!/usr/bin/python2.7 -u\n";
-	$output .= "import sys\n";
 	$output .= "from collections import defaultdict\n";
+	$output .= "import fileinput\n";
 	$output .= "import re\n";
+	$output .= "import sys\n";
 	$output .= "import perl2python as _p2p_\n";
 	$output .= "ARGV = sys.argv[1:]\n";
+	$output .= "_input_ = fileinput.input()\n";
 	$output .= "\n";
+
+	# initialise variables
+	$output .= join ", ", sort @variables;
+	$output .= " = ";
+	for ($i = 0; $i <= $#variables; $i++) {
+		$output .= '""';
+		if ($i < $#variables) {
+			$output .= ", ";
+		}
+	}
+	$output .= "\n";
+
+	# actual code
 	$output .= compile($tree_ref) . "\n";
-	#print "\n\n";
+
 	print $output;
 	print "\n";
 }

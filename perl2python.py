@@ -33,38 +33,6 @@ def fopen(s):
 		return sys.stdin
 	return open(s)
 
-__current_file = None
-__started_with_args = len(ARGV) > 0
-def input():
-	"""Reads lines from files given on the command line, or stdin if none are provided (emulates <> in Perl)."""
-
-	global __current_file
-	global __started_with_args	
-
-	# no arguments: read from STDIN
-	if not __started_with_args:
-		return sys.stdin.readline()
-
-	if not __current_file:
-		# open a file
-		if len(ARGV):
-			__current_file = fopen(ARGV[0])
-			del ARGV[0]
-		else:
-			return None
-
-		return input()
-
-	line = __current_file.readline()
-	if not line:
-		# file is finished! close the handle
-		__current_file.close()
-		__current_file = None
-
-		return input()
-
-	return line
-
 def chomp(s):
 	"""Removes a single newline from a string."""
 	if s.endswith("\n"):
