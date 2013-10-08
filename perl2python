@@ -10,6 +10,7 @@ use Switch;
 $debug = 0; # dumps the results of tokenisation and parsing
 if ($#ARGV >= 0 && $ARGV[0] eq "-d") {
 	$debug = 1;
+	shift @ARGV;
 }
 
 # --== LEXER ==--
@@ -43,6 +44,7 @@ use constant TOKENS => qw(
 	RANGE
 	HANDLE_INPUT
 	HANDLE_INPUT_MULTILINE
+	REGEX
 );
 # 'reassign' is a special token that can succeed operations
 # just a hacky way of dealing with +=, -=, *=, &=, etc.
@@ -75,6 +77,8 @@ use constant STATES => qw(
 	STATE_STRING
 	STATE_NUMBER
 	STATE_HANDLE_INPUT
+	STATE_REGEX
+	STATE_REGEX_SUB
 );
 
 # tokens are stored as hashes of type and value
@@ -265,10 +269,21 @@ sub tokenise {
 					}
 				}
 			} elsif ($curr eq "/") {
-				push @tokens, makeToken(DIV);
-				if ($next eq "=") {
-					push @tokens, makeToken(REASSIGN);
-					$i++;
+				# was the last token a match? (/blergh/)
+				# or, was the last token a word, and the token before it a match? (s/belrgh/asdfhg/)
+				if ($tokens[-1]->{"type"} eq MATCH) {
+					$state = STATE_REGEX;
+				} elsif ($tokens[-1]->{"type"} eq WORD && $tokens[-2]->{"type"} eq MATCH) {
+					$state = STATE_REGEX_SUB;
+				} else {
+
+					# nope, just ordinary division
+					push @tokens, makeToken(DIV);
+					if ($next eq "=") {
+						push @tokens, makeToken(REASSIGN);
+						$i++;
+					}
+
 				}
 			} elsif ($curr eq "+") {
 				# is it increment?
@@ -407,6 +422,36 @@ sub tokenise {
 				# consume char
 				$value .= $curr;
 			}
+		} elsif ($state eq STATE_REGEX || $state eq STATE_REGEX_SUB) {
+			# keep reading until we hit /
+			if ($curr eq "/") {
+				push @tokens, makeToken(REGEX, $value);
+
+				if ($state eq STATE_REGEX_SUB) {
+					$state = STATE_REGEX; # we need to read two regexes for a substitute!
+				} elsif ($state eq STATE_REGEX) {
+					$state = STATE_IDLE;
+				}
+				$value = "";				
+			} elsif ($curr eq "\\") {
+				# is it a backslash followed by a forward slash? i.e. do we need to escape it
+				if ($next eq "/") {
+					# consume just the /
+					$value .= $next;
+					$i++;
+				} elsif ($next eq "\\") {
+					# consume both backslashes
+					$value .= $curr . $curr;
+					$value .= $next . $next;
+					$i++;
+				} else {
+					# consume twice, because regex is weird
+					$value .= $curr . $curr;
+				}
+			} else {
+				# consume char!!!!!
+				$value .= $curr;
+			}
 		} elsif ($state eq STATE_SCALAR || $state eq STATE_ARRAY || $state eq STATE_HASH) {
 			# special case: if we're supposedly reading a hash, and something that doesn't look
 			# like a variable name succeeds the %, read it as modulo instead
@@ -525,6 +570,8 @@ use constant AST_NODES => qw(
 
 	NODE_ARRAY_LIST
 	NODE_HASH_LIST
+
+	NODE_REGEX
 
 	NODE_SECTIONS
 );
@@ -648,28 +695,6 @@ sub parse_for {
 		# if it's an array, it's type 2
 		# otherwise type 1
 		%curr = %{$tokens[$upto]};
-
-		# if ($curr{"type"} eq ARRAY) {
-		# 	# consume array token
-		# 	$upto++;
-
-		# 	my %arr = %curr;
-		# 	$node{"type"} = NODE_FOREACH;
-		# 	$node{"value"} = \%arr;
-		# } else {
-		# 	# parse expressions
-		# 	my $left_ref = parse_expr();
-
-		# 	# consume range token (..)
-		# 	%curr = %{$tokens[$upto]};
-		# 	$upto++;
-		# 	($curr{"type"} eq RANGE) or die "Expecting range symbol (..)";
-
-		# 	my $right_ref = parse_expr();
-
-		# 	$node{"type"} = NODE_FOR_RANGE;
-		# 	$node{"value"} = [$left_ref, $right_ref];
-		# }
 
 		# parse an expression
 		my $left_ref = parse_expr();
@@ -800,7 +825,6 @@ sub parse_sections {
 				push @sections, parse_if();
 			} elsif ($name eq "if") {
 				# if conditional
-				#die "TODO: if statements";
 				push @sections, parse_if();
 			} elsif ($name eq "elsif") {
 				# else if
@@ -828,7 +852,6 @@ sub parse_sections {
 
 sub parse_statements {
 	# parse numerous statements
-	# TODO: if/while loops
 
 	my @statements = ();
 
@@ -870,22 +893,11 @@ sub parse_statement {
 	         ($type eq ARRAY) ||
 	         ($type eq HASH)) {
 		# varmod, maybe...
-		# if (defined $next{"type"} &&
-		# 	(($next{"type"} eq EQUALS) ||
-		# 	($next{"type"} eq INCREMENT) ||
-		# 	($next{"type"} eq DECREMENT) ||
-		# 	(defined $next2{"type"} && $next2{"type"} eq REASSIGN))) {
-		# 	#print "varmod\n";
-		# 	$node_ref = parse_varmod();
-		# } else {
-		# 	$node_ref = parse_expr();
-		# }
 
 		# read the variable in (backup $upto first, however)
 		# this is necessary to read in all the tokens constituting an index
 		my $upto_backup = $upto;
 		my $var_ref = parse_var();
-		#print "VAR".Dumper($var_ref)."\n";
 
 		my %next;
 		my %next2;
@@ -912,7 +924,6 @@ sub parse_statement {
 		}
 	} else {
 		# default to expression
-		#$node_ref = parse_call();
 		$node_ref = parse_expr();
 	}
 
@@ -1289,6 +1300,52 @@ sub parse_expr {
 
 			return \%node;
 
+		} elsif ($type eq MATCH) {
+			# hello regex my old friend...
+
+			# consume =~
+			$upto++;
+
+			my %node = (
+				"type" => NODE_REGEX,
+				"value" => $left_ref
+			);
+
+			# is it a regular match, or is there an s in there?
+			# TODO: handle s
+			%curr = %{$tokens[$upto]};
+			if ($curr{"type"} eq WORD) {
+				# looks like an s, dammit
+				($curr{"value"} eq "s") or die "Expected 's'";
+
+				# consume s
+				$upto++;
+
+				my $pattern_ref = $tokens[$upto];
+				$upto++;
+				my $repl_ref = $tokens[$upto];
+				$upto++;
+
+				# check for flags
+				my @flags = ();
+
+				%curr = %{$tokens[$upto]};
+				if ($curr{"type"} eq WORD) {
+					push @flags, $curr{"value"};
+					$upto++;
+				}
+
+				$node{"children"} = [$pattern_ref, $repl_ref, \@flags];
+			} else {
+				# regular regex match
+
+				my $pattern_ref = $tokens[$upto];
+				$upto++;
+
+				$node{"children"} = [$pattern_ref];
+			}
+
+			return \%node;
 		}
 	}
 
@@ -1694,77 +1751,126 @@ sub compile {
 		$value =~ s/"/\\"/g;
 		@chars = split //, $value;
 
-		# let's do some shitty mini tokenisation/parsing! yay
-		my $i = 0;
-		my $tmp = ""; # holds the part of the ordinary string we've read so far
-		my $empty = 1; # holds whether we've output something yet
-		while ($i < @chars) {
-			my $curr = $chars[$i];
-			my $next;
-			if ($i+1 <= $#chars) {
-				$next = $chars[$i+1];
-			}
+		if (@chars == 0) {
+			$output .= '""';
+		} else {
 
-			if ($curr eq "\\") {
-				if (defined $next && $next eq '$') {
-					$tmp .= '$';
-					$i += 2;
-					next;
+			# let's do some shitty mini tokenisation/parsing! yay
+			my $i = 0;
+			my $tmp = ""; # holds the part of the ordinary string we've read so far
+			my $empty = 1; # holds whether we've output something yet
+			while ($i < @chars) {
+				my $curr = $chars[$i];
+				my $next;
+				if ($i+1 <= $#chars) {
+					$next = $chars[$i+1];
+				}
+
+				if ($curr eq "\\") {
+					if (defined $next && $next eq '$') {
+						$tmp .= '$';
+						$i += 2;
+						next;
+					} else {
+						$tmp .= $curr;
+					}
+				} elsif (($curr eq '$') || ($curr eq '@')) {
+					# oh boy interpolation here we go
+					if (!$empty) {
+						$output .= " + ";
+					} else {
+						$empty = 0;
+					}
+
+					if (length($tmp) > 0) {
+						$output .= '"' . $tmp . '" + ';
+						$tmp = "";
+					}
+
+					$interpolating = 1;
+
+					# tokenise expression using the global tokeniser
+					# so much hax...
+					@tokens = tokenise(substr($value, $i, length($value)-$i));
+
+					if ($debug) {
+						print "tokens:".Dumper(@tokens)."\n";
+					}
+					# now parse it
+					# it'll stop once it considers the expression is done
+					$upto = 0;
+					$tree_ref = parse_var();
+
+					if ($debug) {
+						print Dumper($tree_ref)."\n";
+					}
+					# and compile it
+					
+					$str_output = compile($tree_ref);
+					$output .= "_p2p_.string(" . $str_output . ")";
+
+					$interpolating = 0;
+
+					# hax to the max
+					$i += $last_interpolation_index;
 				} else {
 					$tmp .= $curr;
 				}
-			} elsif (($curr eq '$') || ($curr eq '@')) {
-				# oh boy interpolation here we go
+
+				$i++;
+			}
+
+			# add tmp if there's something left
+			if (length($tmp) > 0) {
 				if (!$empty) {
 					$output .= " + ";
-				} else {
-					$empty = 0;
 				}
-
-				if (length($tmp) > 0) {
-					$output .= '"' . $tmp . '" + ';
-					$tmp = "";
-				}
-
-				$interpolating = 1;
-
-				# tokenise expression using the global tokeniser
-				# so much hax...
-				@tokens = tokenise(substr($value, $i, length($value)-$i));
-
-				if ($debug) {
-					print "tokens:".Dumper(@tokens)."\n";
-				}
-				# now parse it
-				# it'll stop once it considers the expression is done
-				$upto = 0;
-				$tree_ref = parse_var();
-
-				if ($debug) {
-					print Dumper($tree_ref)."\n";
-				}
-				# and compile it
-				
-				$str_output = compile($tree_ref);
-				$output .= "_p2p_.string(" . $str_output . ")";
-
-				$interpolating = 0;
-
-				# hax to the max
-				$i += $last_interpolation_index;
-			} else {
-				$tmp .= $curr;
+				$output .= '"' . $tmp . '"';
 			}
 
-			$i++;
 		}
 
-		# add tmp if there's something left
-		if (length($tmp) > 0) {
-			if (!$empty) {
-				$output .= " + ";
+	} elsif ($type eq NODE_REGEX) {
+
+		# isolated regex (i.e. outside of a condition)
+		# TODO: handle s
+
+		# do interpolation by switching it to string and recompiling
+		my $pattern_ref = $node{"children"}[0];
+		$pattern_ref->{"type"} = STRING_INTERPOLATED;
+		#$output .= compile($pattern_ref);
+
+		# is it a normal match or a substitution?
+		if (@{$node{"children"}} == 1) { # normal match thing
+			$output .= "_match_ = re.search(";
+			$output .= compile($pattern_ref);
+			$output .= ", ";
+			$output .= compile($node{"value"}); # var
+			$output .= ")";
+		} elsif (@{$node{"children"}} == 3) { # substitution
+			# read replacement string
+			# also do interpolation with weird shit
+
+			my $count = 1; # default count is 1, i.e. only make a single replacement
+
+			my $repl_ref = $node{"children"}[1];
+			$repl_ref->{"type"} = STRING_INTERPOLATED;
+
+			my @flags = @{$node{"children"}[2]};
+			if (grep /^g$/, @flags) {
+				$count = 0;
 			}
-			$output .= '"' . $tmp . '"';
+
+			$output .= compile($node{"value"}); # var
+			$output .= " = re.sub(";
+			$output .= compile($pattern_ref);
+			$output .= ", ";
+			$output .= compile($repl_ref);
+			$output .= ", ";
+			$output .= compile($node{"value"}); # var again
+			$output .= ", ";
+			$output .= $count;
+			$output .= ")";
 		}
 
 	} elsif ($type eq NUMBER) {
@@ -1787,11 +1893,21 @@ sub compile {
 		# if the first char is #, it's actually last index of array
 		my $name = $node{"name"};
 
+		# also check if the name is numeric, since it's then a bloody regex thing (except for 0)
+
 		if (substr($name, 0, 1) eq "#") {
 			$name = substr($name, 1, length($name));
 			$output .= "len(";
 			$output .= $name;
 			$output .= ")-1";
+		} elsif ($name =~ /^[0-9]+$/) {
+			if ($name == "0") {
+				# name of current script
+				$output .= "sys.argv[0]";
+			} else {
+				# regex match index
+				$output .= "_match_.group(" . $name . ")";
+			}
 		} else {
 			if (defined $node{"index"}) {
 				$output .= $node{"name"};
@@ -2041,6 +2157,7 @@ foreach $file (@files) {
 	$output = "#!/usr/bin/python2.7 -u\n";
 	$output .= "import sys\n";
 	$output .= "from collections import defaultdict\n";
+	$output .= "import re\n";
 	$output .= "import perl2python as _p2p_\n";
 	$output .= "ARGV = sys.argv[1:]\n";
 	$output .= "\n";

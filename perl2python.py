@@ -27,7 +27,7 @@ def string(s):
 	else:
 		return str(s)
 
-def open(s):
+def fopen(s):
 	"""Functions the same as Python's open function, except that trying to open '-' will return stdin."""
 	if s == "-":
 		return sys.stdin
@@ -48,12 +48,12 @@ def input():
 	if not __current_file:
 		# open a file
 		if len(ARGV):
-			__current_file = __open(ARGV[0])
+			__current_file = fopen(ARGV[0])
 			del ARGV[0]
 		else:
 			return None
 
-		return __input()
+		return input()
 
 	line = __current_file.readline()
 	if not line:
@@ -61,7 +61,7 @@ def input():
 		__current_file.close()
 		__current_file = None
 
-		return __input()
+		return input()
 
 	return line
 
