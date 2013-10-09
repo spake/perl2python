@@ -1,8 +1,9 @@
 #!/usr/bin/perl -w
 
-use Data::Dumper; # TODO: remove this at some point
+use Data::Dumper;
 use Switch;
 use strict "vars";
+use warnings;
 
 # george caley presents:
 # perl2python
@@ -1353,7 +1354,6 @@ sub parse_expr {
 			);
 
 			# is it a regular match, or is there an s in there?
-			# TODO: handle s
 			%curr = %{$tokens[$upto]};
 			if ($curr{"type"} eq WORD) {
 				# looks like an s, dammit
@@ -1435,7 +1435,10 @@ sub parse_var {
 		# if we're not interpolating, add it to the list of variables to be initialised
 		my $name = $curr{"value"};
 		if (!$interpolating && !grep /^$name$/, @variables) {
-			push @variables, $name;
+			if ($name =~ /^[A-Za-z_]/) {
+				# check it's not $1, $2, etc.
+				push @variables, $name;
+			}
 		}
 
 	} elsif ($curr{"type"} eq ARRAY) {
@@ -1476,7 +1479,7 @@ sub op_to_string {
 		case XOR			{ return "^" }
 		case LOGICAL_AND	{ return "and" }
 		case LOGICAL_OR		{ return "or" }
-		case LOGICAL_NOT	{ return "not" }
+		case LOGICAL_NOT	{ return "not " }
 
 		case DOUBLE_EQUALS	{ return "==" }
 		case NOT_EQUALS		{ return "!=" }
@@ -1709,9 +1712,19 @@ sub compile {
 
 			# are we reading, writing, or opening a process?
 			my $open_string = $args[1]->{"value"};
-			if ($open_string =~ /^\s*\|/) {
+			if ($open_string =~ /\|\s*$/) {
 				# open a process
-				die "TODO: processes";
+
+				# remove pipe
+				$open_string =~ s/\s*\|\s*$//;
+
+				# put back in for interpolation
+				$args[1]->{"value"} = $open_string;
+
+				$output .= $file_ref->{"name"};
+				$output .= " = os.popen(";
+				$output .= compile($args[1]);
+				$output .= ", 'r')";
 			} else {
 				my $flag;
 				if ($open_string =~ /^\s*</) {
@@ -1748,7 +1761,7 @@ sub compile {
 				$name = "continue";
 			}
 			# is there an if statement child?
-			if (@args > 0) {
+			if (@args > 0 && $args[0] != $anon_ref) {
 				$output .= "if ";
 				$output .= compile($args[0]);
 				$output .= ": ";
@@ -2028,7 +2041,6 @@ sub compile {
 
 	} elsif ($type eq COMMENT) {
 
-		$output .= $indent;
 		$output .= "#";
 		$output .= $node{"value"};
 		#$output .= "\n";
@@ -2114,7 +2126,7 @@ sub compile {
 
 		my @items = @{$node{"children"}};
 
-		$output .= "{";
+		$output .= "defaultdict(str, {";
 		for my $i (0..$#items) {
 			$output .= compile($items[$i]->[0]); # key
 			$output .= ": ";
@@ -2123,7 +2135,7 @@ sub compile {
 				$output .= ", ";
 			}
 		}
-		$output .= "}";
+		$output .= "})";
 
 	} elsif ($type eq NODE_ASSIGNMENT) {
 
@@ -2317,6 +2329,7 @@ foreach my $file (@files) {
 	my $output = "#!/usr/bin/python2.7 -u\n";
 	$output .= "from collections import defaultdict\n";
 	$output .= "import fileinput\n";
+	$output .= "import os\n";
 	$output .= "import re\n";
 	$output .= "import sys\n";
 	$output .= "import perl2python as _p2p_\n";

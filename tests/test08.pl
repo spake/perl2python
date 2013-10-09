@@ -102,3 +102,12 @@ print "$a\n";
 $a = "Hello World";
 $a =~ s/[a-z]/*/ig;
 print "$a\n";
+
+# test matches
+$a = "Hello 50 World";
+$a =~ /([0-9])/;
+print "$1\n";
+$a =~ /([A-Z][a-z]{4})/;
+print "$1\n";
+$a =~ /([A-Z])([a-z]{4})/;
+print "$1 $2\n";
