@@ -1860,9 +1860,9 @@ sub compile {
 			$output .= ".values()";
 		} elsif ($name eq "sort") {
 			# todo: handle fancy comparison stuff (unlikely though)
-			$output .= "sorted(";
+			$output .= "sorted(map(_p2p_.string, ";
 			$output .= compile($args[0]);
-			$output .= ")";
+			$output .= "))";
 		} elsif ($name eq "return") {
 			# don't use parentheses
 			$output .= "$name ";

@@ -1,6 +1,10 @@
 #!/usr/bin/perl -w
+
+# regex_test.pl
+
 $p = "wat";
 
+# interpolation in regex
 $a = "hello, world";
 $a =~ s/\w/$p/;
 print "$a\n";
@@ -77,3 +81,24 @@ if ($a =~ /[aeou]/) {
 if ($a =~ /[aeiou]/) {
 	print "correct 7\n";
 }
+
+$a = "hello|world";
+$a =~ s/\|//;
+print "$a\n";
+
+# lastly, test i on its own
+$a = "Hello World";
+$a =~ s/[a-z]/*/i;
+print "$a\n";
+
+$a = "Hello World";
+$a =~ s/[a-z]/*/g;
+print "$a\n";
+
+$a = "Hello World";
+$a =~ s/[a-z]/*/gi;
+print "$a\n";
+
+$a = "Hello World";
+$a =~ s/[a-z]/*/ig;
+print "$a\n";
