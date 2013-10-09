@@ -2,12 +2,13 @@
 
 use Data::Dumper; # TODO: remove this at some point
 use Switch;
+use strict "vars";
 
 # george caley presents:
 # perl2python
 # a COMP2041 assignment
 
-$debug = 0; # dumps the results of tokenisation and parsing
+our $debug = 0; # dumps the results of tokenisation and parsing
 if ($#ARGV >= 0 && $ARGV[0] eq "-d") {
 	$debug = 1;
 	shift @ARGV;
@@ -55,7 +56,7 @@ use constant TOKENS => qw(
 # this will hopefully clean up the lexer code a bit
 # anything slightly less trivial (e.g. =, which is special because we need to test ==) 
 # will need its own code
-%singleCharTokens = (
+our %singleCharTokens = (
 	";" => SEMICOLON,
 	"(" => PARENTHESIS_OPEN,
 	")" => PARENTHESIS_CLOSE,
@@ -101,8 +102,8 @@ sub makeToken {
 
 # string interpolation requires a weird call to the tokeniser
 # we want to keep track of the index of the last variable or closing square/curly bracket
-$last_interpolation_index = 0;
-$interpolating = 0;
+our $last_interpolation_index = 0;
+our $interpolating = 0;
 
 sub tokenise {
 	my $data = shift;
@@ -132,6 +133,9 @@ sub tokenise {
 	my $nesting = 0;
 
 	my $seen_comment = 0;
+
+	my $separator;
+	my $type;
 
 	while ($i < @chars) {
 
@@ -269,9 +273,11 @@ sub tokenise {
 					}
 				}
 			} elsif ($curr eq "/") {
-				# was the last token a match? (/blergh/)
+				# was the last token a match? (/blergh/) or split (split /w+/ or split(/w+))
 				# or, was the last token a word, and the token before it a match? (s/belrgh/asdfhg/)
-				if ($tokens[-1]->{"type"} eq MATCH) {
+				if ($tokens[-1]->{"type"} eq MATCH ||
+					($tokens[-1]->{"type"} eq WORD && $tokens[-1]->{"value"} eq "split") ||
+					($tokens[-1]->{"type"} eq PARENTHESIS_OPEN)) {
 					$state = STATE_REGEX;
 				} elsif ($tokens[-1]->{"type"} eq WORD && $tokens[-2]->{"type"} eq MATCH) {
 					$state = STATE_REGEX_SUB;
@@ -573,6 +579,8 @@ use constant AST_NODES => qw(
 
 	NODE_REGEX
 
+	NODE_FUNCTION
+
 	NODE_SECTIONS
 );
 
@@ -590,9 +598,9 @@ use constant AST_NODES => qw(
 
 # the parser operates on a few global variables
 # the token array and the current token counter
-@tokens = ();
-@variables = (); # so we can initialise them!
-$upto = 0;
+our @tokens = ();
+our @variables = (); # so we can initialise them!
+our $upto = 0;
 
 sub parse {
 	#my $statements_ref = parse_statements();
@@ -657,6 +665,27 @@ sub parse_else {
 	);
 
 	return \%node;
+}
+
+sub parse_function {
+	# consume the 'sub'
+	$upto++;
+
+	# consume the function name
+	my %curr = %{$tokens[$upto]};
+	my $function_name = $curr{"value"};
+	$upto++;
+
+	# parse the block
+	my $block_ref = parse_block();
+
+	my %node = (
+		"type" => NODE_FUNCTION,
+		"value" => $function_name,
+		"children" => [$block_ref]
+	);
+
+	return \%node;	
 }
 
 sub parse_for {
@@ -813,6 +842,8 @@ sub parse_sections {
 		my %curr = %{$tokens[$upto]};
 		my $type = $curr{"type"};
 
+		my $name;
+
 		# are we looking at a conditional, loop, or statement?
 		if ($type eq WORD) {
 			# could be...
@@ -833,6 +864,9 @@ sub parse_sections {
 			} elsif ($name eq "else") {
 				# else
 				push @sections, parse_else();
+			} elsif ($name eq "sub") {
+				# function def
+				push @sections, parse_function();
 			} else {
 				# suppose it's none of the above then
 				# parse as a statement
@@ -993,7 +1027,7 @@ sub parse_varmod {
 		     ($type eq DECREMENT)) {
 		# create an assignment of the form
 		# <var> = <var> + 1
-		$one_ref = makeToken(NUMBER);
+		my $one_ref = makeToken(NUMBER);
 		$one_ref->{"value"} = 1;
 
 		my $op_ref;
@@ -1149,43 +1183,49 @@ sub parse_args {
 		$upto++;
 	}
 
-	my $first = 1;
+	if ($curr{"type"} ne COMMA) {
+		# nested functions without parentheses are extremely ambiguous!
+		# but one thing that's for sure is that if the first token is a comma,
+		# it must just be a call to the function with no args.
 
-	while ($upto <= $#tokens) {
-		my %curr = %{$tokens[$upto]};
-		my %next;
+		my $first = 1;
 
-		if ($upto < $#tokens) {
-			%next = %{$tokens[$upto+1]};
-		}
+		while ($upto <= $#tokens) {
+			my %curr = %{$tokens[$upto]};
+			my %next;
 
-		if ($curr{"type"} eq PARENTHESIS_CLOSE) {
-			# ...were we expecting it?
-			if ($parentheses) {
-				# consume the closing parenthesis
-				$upto++;
+			if ($upto < $#tokens) {
+				%next = %{$tokens[$upto+1]};
+			}
+
+			if ($curr{"type"} eq PARENTHESIS_CLOSE) {
+				# ...were we expecting it?
+				if ($parentheses) {
+					# consume the closing parenthesis
+					$upto++;
+					last;
+				} else {
+					# end anyway, but don't consume anything
+					# nested functions, what even
+					last;
+				}
+			} elsif ($curr{"type"} eq SEMICOLON || $curr{"type"} eq CURLY_CLOSE) {
+				# don't actually eat the semicolon, leave that to parse_statement
 				last;
 			} else {
-				# end anyway, but don't consume anything
-				# nested functions, what even
-				last;
+				# must be an argument
+				# if it's not the first arg, we need to consume the comma too
+				if (!$first) {
+					($curr{"type"} eq COMMA) or die "Expecting comma";
+					$upto++;
+				}
+				
+				push @args, parse_arg();
 			}
-		} elsif ($curr{"type"} eq SEMICOLON || $curr{"type"} eq CURLY_CLOSE) {
-			# don't actually eat the semicolon, leave that to parse_statement
-			last;
-		} else {
-			# must be an argument
-			# if it's not the first arg, we need to consume the comma too
-			if (!$first) {
-				#print Dumper(\%curr);
-				($curr{"type"} eq COMMA) or die "Expecting comma";
-				$upto++;
-			}
-			
-			push @args, parse_arg();
+
+			$first = 0;
 		}
 
-		$first = 0;
 	}
 
 	# return the arguments (by reference)
@@ -1413,7 +1453,7 @@ sub parse_var {
 # ...oh god, why didn't I just use regex in the first place ;_;
 
 # have a global for indentation level
-$indent_level = 0;
+our $indent_level = 0;
 use constant INDENT => "  ";
 
 sub op_to_string {
@@ -1469,7 +1509,7 @@ sub compile {
 		#for $statement (@{$node{"children"}}) {
 		my @statements = @{$node{"children"}};
 
-		for $i (0..$#statements) {
+		for my $i (0..$#statements) {
 			$output .= $indent;
 			$output .= compile($statements[$i]);
 			if ($i < $#statements) {
@@ -1488,7 +1528,8 @@ sub compile {
 		     ($type eq NODE_ELSE) ||
 		     ($type eq NODE_WHILE) ||
 		     ($type eq NODE_FOR_RANGE) ||
-		     ($type eq NODE_FOREACH)) {
+		     ($type eq NODE_FOREACH) ||
+		     ($type eq NODE_FUNCTION)) { # functions are just elses with a name!
 
 		my $statement_ref = $node{"value"};
 
@@ -1505,7 +1546,11 @@ sub compile {
 			$block_type = "for";
 		}
 
-		if ($type eq NODE_ELSE) {
+		if ($type eq NODE_FUNCTION) {
+			$output .= "def ";
+			$output .= $statement_ref; # this will be a string for functions (the name of the function)
+			$output .= "(*_)";
+		} elsif ($type eq NODE_ELSE) {
 			$output .= $block_type;
 		} elsif ($type eq NODE_FOR_RANGE) {
 			# value will be the lower and upper bounds of the range
@@ -1556,6 +1601,13 @@ sub compile {
 				# use variable in condition
 				$output .= $indent . "$block_type ";
 				$output .= compile($var_ref);
+			} elsif ($statement_ref->{"type"} eq NODE_REGEX) { # or a regex match
+				$output .= compile($statement_ref);
+				$output .= "\n";
+
+				# use _match_ in condition
+				$output .= $indent . "$block_type ";
+				$output .= "_match_";
 			} else {
 				$output .= "$block_type ";
 				$output .= compile($node{"value"});
@@ -1564,13 +1616,22 @@ sub compile {
 		$output .= ":\n";
 
 		$indent_level++;
+
+		# if it's a function, ensure that _ is cast to a list (tuples are immutable)
+		if ($type eq NODE_FUNCTION) {
+			$output .= $indent . INDENT . "_ = list(_)\n";
+		}
+
 		$output .= compile($node{"children"}[0]);
 
 		# is it an assignment?
-		if (ref($statement_ref) eq "HASH" && $statement_ref->{"type"} eq NODE_ASSIGNMENT) {
-			# run the assignment at the end of the loop
-			$output .= "\n";
-			$output .= $indent . INDENT . compile($statement_ref);
+		# also check whether the statement is actually a hash before continuing
+		if (ref($statement_ref) eq "HASH") {
+			if ($statement_ref->{"type"} eq NODE_ASSIGNMENT || $statement_ref->{"type"} eq NODE_REGEX) {
+				# run the assignment at the end of the loop
+				$output .= "\n";
+				$output .= $indent . INDENT . compile($statement_ref);
+			}
 		}
 
 		$indent_level--;
@@ -1607,8 +1668,18 @@ sub compile {
 		my $name = $node{"name"};
 		my @args = @{$node{"children"}};
 
+		# add the anonymous variable to args if none were supplied
+		my $anon_ref = {
+			"type" => NODE_VARIABLE,
+			"name" => "_"
+		};
+
+		if (@args == 0) {
+			push @args, $anon_ref;
+		}
+
 		if ($name eq "print") {
-			for $i (0..$#args) {
+			for my $i (0..$#args) {
 				if ($i > 0) { # first line will already have the indent
 					$output .= $indent;
 				}
@@ -1621,18 +1692,55 @@ sub compile {
 				}
 			}
 		} elsif ($name eq "printf") {
-			$format_string = compile($args[0]);
+			my $format_string = compile($args[0]);
 
 			$output .= "sys.stdout.write(";
 			$output .= $format_string;
 			$output .= " % (";
-			for $i (1..$#args) {
+			for my $i (1..$#args) {
 				$output .= compile($args[$i]);
 				if ($i < $#args) {
 					$output .= ", ";
 				}
 			}
 			$output .= "))";
+		} elsif ($name eq "open") {
+			my $file_ref = $args[0];
+
+			# are we reading, writing, or opening a process?
+			my $open_string = $args[1]->{"value"};
+			if ($open_string =~ /^\s*\|/) {
+				# open a process
+				die "TODO: processes";
+			} else {
+				my $flag;
+				if ($open_string =~ /^\s*</) {
+					# reading
+					$flag = "r";
+					$open_string =~ s/^\s*<\s*//;
+				} elsif ($open_string =~ /^\s*>/) {
+					# writing
+					$flag = "w";
+					$open_string =~ s/^\s*>\s*//;
+				}
+				# put new open string back into arg for interpolation
+				$args[1]->{"value"} = $open_string;
+
+				$output .= $file_ref->{"name"};
+				$output .= " = open(";
+				$output .= compile($args[1]);
+				$output .= ', "';
+				$output .= $flag;
+				$output .= '")'
+			}
+
+		} elsif ($name eq "close") {
+			my $file_ref = $args[0];
+
+			# close the file
+
+			$output .= $file_ref->{"name"};
+			$output .= ".close()";
 		} elsif ($name eq "last" || $name eq "next") {
 			if ($name eq "last") {
 				$name = "break";
@@ -1659,13 +1767,35 @@ sub compile {
 			# split -> split
 			# fancy that...
 
-			# TODO: handle regex & limit
+			# add anonymous variable if only 1 arg
+			if (@args == 1) {
+				push @args, $anon_ref;
+			}
+
 			my $pattern_ref = $args[0];
 			my $var_ref = $args[1];
-			$output .= compile($var_ref);
-			$output .= ".split(";
-			$output .= compile($pattern_ref);
-			$output .= ")";
+
+			if ($pattern_ref->{"type"} eq REGEX) {
+				# turn into a string and interpolate
+				# special case: empty pattern (python doesn't handle this properly)
+				if ($pattern_ref->{"value"} eq "") {
+					$output .= "list(";
+					$output .= compile($var_ref);
+					$output .= ")";
+				} else {
+					$pattern_ref->{"type"} = STRING_INTERPOLATED;
+					$output .= "re.split(";
+					$output .= compile($pattern_ref);
+					$output .= ", ";
+					$output .= compile($var_ref);
+					$output .= ")";
+				}
+	 		} else {
+				$output .= compile($var_ref);
+				$output .= ".split(";
+				$output .= compile($pattern_ref);
+				$output .= ")";
+			}
 		} elsif ($name eq "join") {
 			my $pattern_ref = $args[0];
 			my $var_ref = $args[1];
@@ -1677,7 +1807,7 @@ sub compile {
 				$output .= compile($var_ref);
 			} else {
 				$output .= "(";
-				for $i (1..$#args) {
+				for my $i (1..$#args) {
 					$output .= compile($args[$i]);
 					if ($i < $#args) {
 						$output .= ", ";
@@ -1733,11 +1863,20 @@ sub compile {
 			$output .= "sorted(";
 			$output .= compile($args[0]);
 			$output .= ")";
+		} elsif ($name eq "return") {
+			# don't use parentheses
+			$output .= "$name ";
+			for my $i (0..$#args) {
+				$output .= compile($args[$i]);
+				if ($i < $#args) {
+					$output .= ", ";
+				}
+			}
 		} else {
 			# ordinary function call
 			$output .= $name;
 			$output .= "(";
-			for $i (0..$#args) {
+			for my $i (0..$#args) {
 				$output .= compile($args[$i]);
 				if ($i < $#args) {
 					$output .= ", ";
@@ -1757,7 +1896,7 @@ sub compile {
 
 		my $value = $node{"value"};
 		$value =~ s/"/\\"/g;
-		@chars = split //, $value;
+		my @chars = split //, $value;
 
 		if (@chars == 0) {
 			$output .= '""';
@@ -1769,7 +1908,7 @@ sub compile {
 			my $empty = 1; # holds whether we've output something yet
 			while ($i < @chars) {
 				my $curr = $chars[$i];
-				my $next;
+				my $next = "";
 				if ($i+1 <= $#chars) {
 					$next = $chars[$i+1];
 				}
@@ -1782,7 +1921,7 @@ sub compile {
 					} else {
 						$tmp .= $curr;
 					}
-				} elsif (($curr eq '$') || ($curr eq '@')) {
+				} elsif ((($curr eq '$') || ($curr eq '@')) && $next ne "") {
 					# oh boy interpolation here we go
 					if (!$empty) {
 						$output .= " + ";
@@ -1807,14 +1946,14 @@ sub compile {
 					# now parse it
 					# it'll stop once it considers the expression is done
 					$upto = 0;
-					$tree_ref = parse_var();
+					my $tree_ref = parse_var();
 
 					if ($debug) {
 						print Dumper($tree_ref)."\n";
 					}
 					# and compile it
 					
-					$str_output = compile($tree_ref);
+					my $str_output = compile($tree_ref);
 					$output .= "_p2p_.string(" . $str_output . ")";
 
 					$interpolating = 0;
@@ -1841,7 +1980,6 @@ sub compile {
 	} elsif ($type eq NODE_REGEX) {
 
 		# isolated regex (i.e. outside of a condition)
-		# TODO: handle s
 
 		# do interpolation by switching it to string and recompiling
 		my $pattern_ref = $node{"children"}[0];
@@ -1964,7 +2102,7 @@ sub compile {
 		my @items = @{$node{"children"}};
 
 		$output .= "[";
-		for $i (0..$#items) {
+		for my $i (0..$#items) {
 			$output .= compile($items[$i]);
 			if ($i < $#items) {
 				$output .= ", ";
@@ -1977,7 +2115,7 @@ sub compile {
 		my @items = @{$node{"children"}};
 
 		$output .= "{";
-		for $i (0..$#items) {
+		for my $i (0..$#items) {
 			$output .= compile($items[$i]->[0]); # key
 			$output .= ": ";
 			$output .= compile($items[$i]->[1]); # value
@@ -1998,7 +2136,7 @@ sub compile {
 			exists $left_ref->{"index_type"} &&
 			$left_ref->{"index_type"} eq HASH) {
 			my $name = $left_ref->{"name"};
-			$output .= "if \"$name\" not in vars(): $name = defaultdict(str)\n";
+			$output .= "if \"$name\" not in vars() or type($name) not in (dict, defaultdict): $name = defaultdict(str)\n";
 			$output .= $indent;
 		}
 		$output .= compile($left_ref);
@@ -2037,16 +2175,17 @@ sub compile {
 			if (@operands == 2) {
 
 				# binary operator
-				# is it arithmetic?
-				# or rather, is it not logic or concatenation
+				# ensure string operation operands are strings
+				# arithmetic operation operands are numbers
+				# etc.
 
 				my $left = compile($operands[0]);
 				my $right = compile($operands[1]);
 
+				my $type0 = $operands[0]->{"type"};
+				my $type1 = $operands[1]->{"type"};
+
 				if (($optype eq CONCAT) ||
-					($optype eq LOGICAL_AND) ||
-					($optype eq LOGICAL_OR) ||
-					($optype eq LOGICAL_NOT) ||
 					($string_comparator && (
 					($optype eq GREATER_THAN) ||
 					($optype eq GREATER_EQUALS) ||
@@ -2055,11 +2194,20 @@ sub compile {
 					($optype eq DOUBLE_EQUALS) ||
 					($optype eq NOT_EQUALS) ||
 					($optype eq CONCAT)))) {
-					# not arithmetic
+					# string ops
+
+					if ($type0 ne STRING) {
+						$left = "_p2p_.string(" . $left . ")";
+					}
+					if ($type1 ne STRING) {
+						$right = "_p2p_.string(" . $right . ")";
+					}
+				} elsif (($optype eq LOGICAL_AND) ||
+					    ($optype eq LOGICAL_OR) ||
+					    ($optype eq LOGICAL_NOT)) {
+					# nothing special to be done here
 				} else {
 					# arithmetic
-					my $type0 = $operands[0]->{"type"};
-					my $type1 = $operands[1]->{"type"};
 
 					if ($type0 ne NUMBER && $type0 ne NODE_EXPRESSION) {
 						$left = "_p2p_.num(" . $left . ")";
@@ -2122,17 +2270,17 @@ sub compile {
 # --== MAIN STUFF ==--
 
 # create list of files from arguments
-@files = @ARGV;
+my @files = @ARGV;
 # if it's empty, add stdin
 if (@ARGV == 0) {
 	push @files, "-";
 }
 
-foreach $file (@files) {
+foreach my $file (@files) {
 
 	open(F, "< $file");
 
-	$data = "";
+	my $data = "";
 	while (<F>) {
 		$data .= $_;
 	}
@@ -2151,7 +2299,7 @@ foreach $file (@files) {
 		print "\n", "-" x 50, "\n";
 	}
 
-	$tree_ref = parse();
+	my $tree_ref = parse();
 
 	if ($debug) {
 		print "PARSING\n\n";
@@ -2166,7 +2314,7 @@ foreach $file (@files) {
 	}
 
 	# top stuff
-	$output = "#!/usr/bin/python2.7 -u\n";
+	my $output = "#!/usr/bin/python2.7 -u\n";
 	$output .= "from collections import defaultdict\n";
 	$output .= "import fileinput\n";
 	$output .= "import re\n";
@@ -2177,17 +2325,19 @@ foreach $file (@files) {
 	$output .= "\n";
 
 	# initialise variables
-	if (@variables > 0) {
-		$output .= join ", ", sort @variables;
-		$output .= " = ";
-		for ($i = 0; $i <= $#variables; $i++) {
-			$output .= '""';
-			if ($i < $#variables) {
-				$output .= ", ";
-			}
-		}
-		$output .= "\n";
+	# add the anonymous variable!
+	if (!grep /^_$/, @variables) {
+		push @variables, "_";
 	}
+	$output .= join ", ", sort @variables;
+	$output .= " = ";
+	for (my $i = 0; $i <= $#variables; $i++) {
+		$output .= '""';
+		if ($i < $#variables) {
+			$output .= ", ";
+		}
+	}
+	$output .= "\n\n";
 
 	# actual code
 	$output .= compile($tree_ref) . "\n";
